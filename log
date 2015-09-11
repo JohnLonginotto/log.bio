@@ -1,4 +1,6 @@
 #!/usr/bin/env python2.7
+# -*- coding: utf-8 -*-
+
 logVersion = 0.1
 
 #######################
@@ -423,10 +425,11 @@ def systemSetup():
         if doit == 'yes': break
         if doit == 'no': exit()
     try: 
-        os.makedirs(os.path.join(backupPath,'backups'),01777)
-        os.chmod(os.path.join(backupPath,'backups'),01777) # Because python makedirs is broken.
-        os.makedirs(os.path.join(offlinePath,'offline'),01777)
-        os.chmod(os.path.join(offlinePath,'offline'),01777) # Because python makedirs is broken.
+        os.makedirs(os.path.join(backupPath,'backups'),01707)
+        os.chmod(os.path.join(backupPath,'backups'),01707) # Because python makedirs is broken.
+        os.makedirs(os.path.join(offlinePath,'offline'),01703)
+        os.chmod(os.path.join(offlinePath,'offline'),01703) # Because python makedirs is broken.
+        #os.chmod(os.path.join(offlinePath,'offline'),0777)
     except OSError:
         if not os.path.isdir(os.path.join(backupPath,'backups')): 
             print '\n\nERROR: I could not create the backups directory :( This is a big problem!'; exit()
@@ -446,6 +449,7 @@ def systemSetup():
 
     logConf = json.dumps(settings,sort_keys=True, indent=4)
     systemData = sqlite3.connect(logConfPath)
+    systemData.text_factory = str
     cursor = systemData.cursor()
     cursor.execute("CREATE TABLE IF NOT EXISTS 'settings' ('settings' TEXT)") # overkill I know, but at
     cursor.execute( "INSERT INTO 'settings' VALUES (?)", (logConf,))          # least everything is together.
@@ -483,6 +487,7 @@ def newUserConf(userConfPath,newConf,allTables=False):
     global configSyncd
     configSyncd = True
     userConf = sqlite3.connect(userConfPath)
+    userConf.text_factory = str
     cursor = userConf.cursor()
     cursor.execute("DROP TABLE IF EXISTS 'settings'")                            # A table with 1 row is
     cursor.execute("CREATE TABLE 'settings' ('settings' TEXT)")                  # overkill I know, but at
@@ -599,6 +604,7 @@ def applyConfigs():
     if os.path.isfile(logConfPath) == False: systemSetup()
 
     systemData = sqlite3.connect(logConfPath)
+    systemData.text_factory = str
     syscursor = systemData.cursor()
     syscursor.execute("SELECT * FROM 'settings'")
     logConf = json.loads(syscursor.fetchone()[0])
@@ -625,6 +631,7 @@ def applyConfigs():
         userSetup(userConfPath)
 
     userConf = sqlite3.connect(userConfPath)
+    userConf.text_factory = str
     usrcursor = userConf.cursor()
     usrcursor.execute("SELECT settings FROM settings")
     result = usrcursor.fetchone()
@@ -721,6 +728,7 @@ def syncData(online):
     # and return the IDs that worked to delete from logs based on ID.
     if online:
         userConf = sqlite3.connect(userConfPath)
+        userConf.text_factory = str
         userCursor = userConf.cursor()
         userCursor.execute("CREATE TABLE IF NOT EXISTS 'logs' ('ID' TEXT, 'data' TEXT)")
         userCursor.execute("SELECT * FROM logs")
@@ -870,7 +878,7 @@ for flag,value in flags.items():
             print '      I will exit now before your command is run so you can think about what to do next :)'; exit()
 
     ## Everything else is either a string, or None (for not used, or generate at run-time)
-    elif (type(value) == str) or value == None:
+    elif (type(value) == str) or (type(value) == unicode) or value == None:
         if settings[flag][2] == 'suggest': settings[flag][0] = value
         else:
             print 'ERROR: You tried to set '+flag+' but this machine\'s configuration insists it remains at ' + str(settings[flag][0])
@@ -1121,16 +1129,17 @@ def log(command):
                 for path,data in stillToHash.items():
                     size,mtime,hashes = data
                     successfullyHashed[path] = [size,mtime,getHashes(path)]
-                    if settings['debug'][0]: print 'Hashed file: ' + str(path)
+                    if settings['debug'][0]: print 'Hashed file: ' + path
                 return successfullyHashed
             else:
                 systemData = sqlite3.connect(logConfPath)
+                systemData.text_factory = str
                 syscursor = systemData.cursor()
                 for path,data in stillToHash.items():
                     size,mtime,hashes = data
                     if int(size) < settings['shortcutAt'][0]:                      # Quicker to hash
                         successfullyHashed[path] = [size,mtime,getHashes(path)]
-                        if settings['debug'][0]: print 'Quickly hashed file: ' + str(path)
+                        if settings['debug'][0]: print 'Quickly hashed file: ' + path
                     else:
                         temp[path] = data
                 stillToHash = temp; temp = {}
@@ -1144,7 +1153,7 @@ def log(command):
                         hashes = getHashes(path)
                         successfullyHashed[path] = [size,mtime,hashes]
                         syscursor.execute("INSERT INTO 'hashLookup' VALUES (?,?,?,?)", (hashes[0],hashes[1],size,mtime))
-                        if settings['debug'][0]: print 'Finally hashed file: ' + str(path)
+                        if settings['debug'][0]: print 'Finally hashed file: ' + path
 
                 systemData.commit()
                 systemData.close()
@@ -1213,7 +1222,8 @@ def log(command):
     ##########################################################################################################
 
     runStart            =       time.time()
-    startTime           =       str(datetime.datetime.now())
+    startTime           =       int(time.time() * 1000) # Most things like time as integer representing milliseconds from Unix epoch
+    startTimeString     =       time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(startTime/1000)) # Python uses float in seconds...    
     ID                  =       ''.join(random.choice(string.lowercase + string.uppercase + string.digits) for blah in range(6))
 
 
@@ -1237,7 +1247,7 @@ def log(command):
 
     stdout = ''
     stderr = ''
-    originalCommand = command
+    originalCommand = command # SQLite requires unicode data in the format u'\u2202'...
     ttyBefore = termios.tcgetattr(sys.stdin)  # We grab the state of the user's terminal, then pop it into raw mode
     tty.setraw(sys.stdin)                     # else we're going to have a bad time (this took FOREVER to figure out)
 
@@ -1247,8 +1257,8 @@ def log(command):
     if settings['screen'][0]:   command = 'screen -h 10000 -S ' + ID + ' -d -m sh -c \'' + command + ' ; /bin/bash \'' 
     elif settings['silent'][0]: command = 'screen -S ' + ID + ' -d -m sh -c \'' + command + ' \''
     if settings['verbose'][0] == True and settings['silent'][0] == False and settings['log'] == True:
-        print '\nStarted at:' , startTime
-        print 'Running: ' + str(ID) + ' - ' + str(originalCommand)
+        print '\nStarted at:' , startTimeString
+        print 'Running: ' + ID + ' - ' + originalCommand
 
     if settings['debug'][0]: print '\n#################### ACTUAL ######## OUTPUT ####################'
 
@@ -1269,19 +1279,18 @@ def log(command):
                     if e.errno != errno.EIO: raise
                     del readable[fd]
                 finally:
-                    if fd in readable:
-                        if not data: del readable[fd]
-                        else:
-                            if fd == parent[0]: stdout += data.decode('utf-8')
-                            else: stderr += data.decode('utf-8')
-                            if settings['verbose'][0] or not settings['log'][0]:
-                                readable[fd].write(data)
-                                readable[fd].flush()
+                    if not data: del readable[fd]
+                    else:
+                        if fd == parent[0]: stdout += data # SQLite requires unicode data in the 
+                        else: stderr += data               # format u'\u2202'
+                        if settings['verbose'][0] or not settings['log'][0]:
+                            readable[fd].write(data)
+                            readable[fd].flush()
     finally:
         p.wait()
         for fd in parent: os.close(fd)
-        if stdout == '': stdout = None
-        if stderr == '': stderr = None
+        stdout = None if stdout == '' else stdout
+        stderr = None if stderr == '' else stderr
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, ttyBefore)
 
     if settings['debug'][0]: print '################################################################'
@@ -1331,13 +1340,13 @@ def log(command):
                     #resourceMaybeUsed[path] = data
                     ''' 
                     If this is uncommented, resources in the current working directory will
-                    be set as "Used", even though they probably weren't. But who knows, maybe
+                    be set as "Maybe Used", even though they probably weren't. But who knows, maybe
                     the executed program does use files in the current working directory?
                     Often the command being run is also in the local directory, in which case
                     surrounding files will be marked as "Maybe Used", so this is really about
                     files in the current working directory which are not mentioned in the
                     command at all. What do we do with them?
-                    '''             
+                    '''
                 else: resourceMaybeModified[path] = [ data, realDirectoryWatchHashNEW[path] ]
             else:
                 resourceMaybeDeleted[path] = data
@@ -1420,12 +1429,12 @@ def log(command):
 
         commandRow = collections.OrderedDict()
         commandRow['ID']                = str(ID)                                                            # ID
-        commandRow['startTime']         = str(startTime)                                                     # startTime
+        commandRow['startTime']         = startTime                                                          # startTime
         commandRow['Duration']          = float(executionTime)                                               # Duration
         commandRow['User']              = settings['username'][0]                                            # User
         commandRow['runAs']             = settings['userAs'][0]                                              # runAs
         commandRow['runOn']             = settings['hostname'][0]                                            # runOn
-        commandRow['Command']           = str(originalCommand)                                               # Command
+        commandRow['Command']           = originalCommand                                                    # Command
         commandRow['Used']              = [resourceUsed[x][2][0] for x in resourceUsed]                      # Used
         commandRow['UsedCount']         = len(resourceUsed)                                                  # UsedCount
         commandRow['Created']           = [resourceCreated[x][2][0] for x in resourceCreated]                # Created
@@ -1600,7 +1609,6 @@ def log(command):
                     'event':commandRow,
                     'resources':resources
                 })
-
                 reply = communicate('log',data,True)
                 if reply['success'] == True:
                     unableToSync = False
@@ -1627,6 +1635,7 @@ def log(command):
             try:
                 userConfPath = os.path.join( settings['offlinePath'][0] , settings['username'][0]+'.conf' )
                 con = sqlite3.connect(userConfPath, timeout=999)
+                con.text_factory = str
                 cur = con.cursor()
                 ## There should be code here to count the number of rows in the 'events' table. 
                 ## If == settings['maxEvents'], update as below, else if less, add, else remove in order.
@@ -1710,13 +1719,13 @@ def log(command):
         message = 'From: LOG <' + mailFrom + '> \n To: User <' + mailTo + '''>
     Subject: Your command has finished running!
 
-    The command: ''' + str(command) + '''
-    Started: ''' + str(startTime) + '''
+    The command: ''' + command + '''
+    Started: ''' + str(startTimeString) + '''
     Duration: ''' + str(executionTime) + '''
     Output:
-    ''' + str(stdout) + '''
+    ''' + stdout + '''
     Errors:
-    ''' + str(stderr) + '''
+    ''' + stderr + '''
 
     Have a great day! :) '''
         try:
@@ -1732,8 +1741,8 @@ def log(command):
             if settings['call'][0] == True:
                 proc=subprocess.Popen("curl -X POST 'https://api.twilio.com/2010-04-01/Accounts/" + AC + "/Calls.json'"
                     " --data-urlencode 'To=" + settings['callTo'][0] + "'  --data-urlencode 'From=+12345644693'"
-                    " -d 'Url=https://ac.gt/log/logCall.xml'  -d 'Method=GET'  -d 'FallbackMethod=GET'"
-                    " -d 'StatusCallbackMethod=GET' -d 'StatusCallback=https://ac.gt/log/failBack.xml'"
+                    " -d 'Url=https://log.bio/logCall.xml'  -d 'Method=GET'  -d 'FallbackMethod=GET'"
+                    " -d 'StatusCallbackMethod=GET' -d 'StatusCallback=https://log.bio/failBack.xml'"
                     " -d 'Record=false' -u " + settings['twilio'][0] , stdout=subprocess.PIPE, stderr=devnull,  shell=True )
                 result = json.loads(proc.communicate()[0])
                 if result['status'] != 'queued':
@@ -1812,5 +1821,9 @@ else:
  7) During system setup, we could offer the user the ability to create a directory if it doesnt exist. Just need to add two other results to checkPath(): 
         [False,doesnt exist (and we cant create it)] and [True,doesnt exist (but we can create it)]
  8) Uninstaller - delete the .log.conf, or even the whole offline/backups directories?
+
+ JavaScript:    Can you code for Node.js? If so, check out the server code for this project at ac.gt/log/log-server.html :)
+                Can you code HTML/CSS/JS? If so, check out the webpage code for this project at ac.gt/log/site.html
 ##########################################################################################################
 '''
+
