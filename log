@@ -423,11 +423,10 @@ def systemSetup():
         if doit == 'yes': break
         if doit == 'no': exit()
     try: 
-        os.makedirs(os.path.join(backupPath,'backups'),01707)
-        os.chmod(os.path.join(backupPath,'backups'),01707) # Because python makedirs is broken.
-        os.makedirs(os.path.join(offlinePath,'offline'),01703)
-        os.chmod(os.path.join(offlinePath,'offline'),01703) # Because python makedirs is broken.
-        #os.chmod(os.path.join(offlinePath,'offline'),0777)
+        os.makedirs(os.path.join(backupPath,'backups'),01777)
+        os.chmod(os.path.join(backupPath,'backups'),01777) # Because python makedirs is broken.
+        os.makedirs(os.path.join(offlinePath,'offline'),01777)
+        os.chmod(os.path.join(offlinePath,'offline'),01777) # Because python makedirs is broken.
     except OSError:
         if not os.path.isdir(os.path.join(backupPath,'backups')): 
             print '\n\nERROR: I could not create the backups directory :( This is a big problem!'; exit()
@@ -1270,13 +1269,14 @@ def log(command):
                     if e.errno != errno.EIO: raise
                     del readable[fd]
                 finally:
-                    if not data: del readable[fd]
-                    else:
-                        if fd == parent[0]: stdout += data.decode('utf-8')
-                        else: stderr += data.decode('utf-8')
-                        if settings['verbose'][0] or not settings['log'][0]:
-                            readable[fd].write(data)
-                            readable[fd].flush()
+                    if fd in readable:
+                        if not data: del readable[fd]
+                        else:
+                            if fd == parent[0]: stdout += data.decode('utf-8')
+                            else: stderr += data.decode('utf-8')
+                            if settings['verbose'][0] or not settings['log'][0]:
+                                readable[fd].write(data)
+                                readable[fd].flush()
     finally:
         p.wait()
         for fd in parent: os.close(fd)
