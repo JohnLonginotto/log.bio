@@ -424,20 +424,19 @@ def systemSetup():
         doit = raw_input('Sound good? [yes/no]: ').lower()
         if doit == 'yes': break
         if doit == 'no': exit()
-    try: 
-        os.makedirs(os.path.join(backupPath,'backups'),01707)
-        os.chmod(os.path.join(backupPath,'backups'),01707) # Because python makedirs is broken.
-        os.makedirs(os.path.join(offlinePath,'offline'),01703)
-        os.chmod(os.path.join(offlinePath,'offline'),01703) # Because python makedirs is broken.
-        #os.chmod(os.path.join(offlinePath,'offline'),0777)
+    try:
+        os.makedirs(os.path.join(backupPath,'backups'),01777)
+        os.chmod(os.path.join(backupPath,'backups'),01777) # Because python makedirs is broken on OSX.
+        os.makedirs(os.path.join(offlinePath,'offline'),01777)
+        os.chmod(os.path.join(offlinePath,'offline'),01777) # Because python makedirs is broken on OSX.
     except OSError:
-        if not os.path.isdir(os.path.join(backupPath,'backups')): 
+        if not os.path.isdir(os.path.join(backupPath,'backups')):
             print '\n\nERROR: I could not create the backups directory :( This is a big problem!'; exit()
         else:
             print '''
     WARN: The backups directory already existed! (but I suspect you already knew that)
     This isnt really a problem - I just thought you should know.'''
-        if not os.path.isdir(os.path.join(offlinePath,'offline')): 
+        if not os.path.isdir(os.path.join(offlinePath,'offline')):
             print '\n\nERROR: I could not create the offline directory :( This is a big problem!'; exit()
         else:
             print '''
@@ -445,7 +444,8 @@ def systemSetup():
     This isnt really a problem - I just thought you should know.'''
 
     os.rename(logPath,os.path.join(logNewPath,'log'))
-    os.chmod(os.path.join(logNewPath,'log'), 0701)
+    os.chown(os.path.join(logNewPath,'log'), os.getuid(), os.getgid() ) # chown/chgrp log as installing user
+    os.chmod(os.path.join(logNewPath,'log'), 0705) # set permissions to only execute
 
     logConf = json.dumps(settings,sort_keys=True, indent=4)
     systemData = sqlite3.connect(logConfPath)
@@ -1279,13 +1279,14 @@ def log(command):
                     if e.errno != errno.EIO: raise
                     del readable[fd]
                 finally:
-                    if not data: del readable[fd]
-                    else:
-                        if fd == parent[0]: stdout += data # SQLite requires unicode data in the 
-                        else: stderr += data               # format u'\u2202'
-                        if settings['verbose'][0] or not settings['log'][0]:
-                            readable[fd].write(data)
-                            readable[fd].flush()
+                    if fd in readable:
+                        if not data: del readable[fd]
+                        else:
+                            if fd == parent[0]: stdout += data # SQLite requires unicode data in the 
+                            else: stderr += data               # format u'\u2202'
+                            if settings['verbose'][0] or not settings['log'][0]:
+                                readable[fd].write(data)
+                                readable[fd].flush()
     finally:
         p.wait()
         for fd in parent: os.close(fd)
