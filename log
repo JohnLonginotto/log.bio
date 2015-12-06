@@ -425,6 +425,7 @@ def systemSetup():
         if doit == 'yes': break
         if doit == 'no': exit()
     try:
+        # DEV NOTE: Perms used to be 707 and 703 for backups and offine respectively. Need to check again.
         os.makedirs(os.path.join(backupPath,'backups'),01777)
         os.chmod(os.path.join(backupPath,'backups'),01777) # Because python makedirs is broken on OSX.
         os.makedirs(os.path.join(offlinePath,'offline'),01777)
@@ -445,11 +446,11 @@ def systemSetup():
 
     os.rename(logPath,os.path.join(logNewPath,'log'))
     os.chown(os.path.join(logNewPath,'log'), os.getuid(), os.getgid() ) # chown/chgrp log as installing user
-    os.chmod(os.path.join(logNewPath,'log'), 0705) # set permissions to only execute
+    os.chmod(os.path.join(logNewPath,'log'), 0705) # set permissions to only read & execute
 
     logConf = json.dumps(settings,sort_keys=True, indent=4)
     systemData = sqlite3.connect(logConfPath)
-    systemData.text_factory = str
+    #systemData.text_factory = str
     cursor = systemData.cursor()
     cursor.execute("CREATE TABLE IF NOT EXISTS 'settings' ('settings' TEXT)") # overkill I know, but at
     cursor.execute( "INSERT INTO 'settings' VALUES (?)", (logConf,))          # least everything is together.
@@ -487,7 +488,7 @@ def newUserConf(userConfPath,newConf,allTables=False):
     global configSyncd
     configSyncd = True
     userConf = sqlite3.connect(userConfPath)
-    userConf.text_factory = str
+    #userConf.text_factory = str
     cursor = userConf.cursor()
     cursor.execute("DROP TABLE IF EXISTS 'settings'")                            # A table with 1 row is
     cursor.execute("CREATE TABLE 'settings' ('settings' TEXT)")                  # overkill I know, but at
@@ -604,7 +605,7 @@ def applyConfigs():
     if os.path.isfile(logConfPath) == False: systemSetup()
 
     systemData = sqlite3.connect(logConfPath)
-    systemData.text_factory = str
+    #systemData.text_factory = str
     syscursor = systemData.cursor()
     syscursor.execute("SELECT * FROM 'settings'")
     logConf = json.loads(syscursor.fetchone()[0])
@@ -631,7 +632,7 @@ def applyConfigs():
         userSetup(userConfPath)
 
     userConf = sqlite3.connect(userConfPath)
-    userConf.text_factory = str
+    #userConf.text_factory = str
     usrcursor = userConf.cursor()
     usrcursor.execute("SELECT settings FROM settings")
     result = usrcursor.fetchone()
@@ -728,7 +729,7 @@ def syncData(online):
     # and return the IDs that worked to delete from logs based on ID.
     if online:
         userConf = sqlite3.connect(userConfPath)
-        userConf.text_factory = str
+        #userConf.text_factory = str
         userCursor = userConf.cursor()
         userCursor.execute("CREATE TABLE IF NOT EXISTS 'logs' ('ID' TEXT, 'data' TEXT)")
         userCursor.execute("SELECT * FROM logs")
@@ -878,7 +879,7 @@ for flag,value in flags.items():
             print '      I will exit now before your command is run so you can think about what to do next :)'; exit()
 
     ## Everything else is either a string, or None (for not used, or generate at run-time)
-    elif (type(value) == str) or (type(value) == unicode) or value == None:
+    elif (type(value) == str) or (type(value) == unicode) or value == None: # DEV NOTE: Recently added unicode typecheck
         if settings[flag][2] == 'suggest': settings[flag][0] = value
         else:
             print 'ERROR: You tried to set '+flag+' but this machine\'s configuration insists it remains at ' + str(settings[flag][0])
@@ -1014,7 +1015,9 @@ def log(command):
                                 else:
                                     levelFour = thisLevelThree.split(' ')
                                     for thisLevelFour in levelFour:
-                                        isResource(thisLevelFour)
+                                        if isResource(thisLevelFour): continue
+                                        elif len(thisLevelFour.split('=')) == 2:
+                                            isResource(thisLevelFour.split('=')[1])
 
         if settings['debug'][0]:
             print '\nrealFilesUsed:'
@@ -1101,7 +1104,7 @@ def log(command):
                     del stillToHash[filePath]
             return [successfullyHashed,stillToHash]
 
-        def remoteMD5Check(successfullyHashed,stillToHash,cursor):
+        def remoteMD5Check(successfullyHashed,stillToHash,syscursor):
             ## The idea was thrown around to support external lookup databases, but we'll have to see...
             return [successfullyHashed,stillToHash]
 
@@ -1133,7 +1136,7 @@ def log(command):
                 return successfullyHashed
             else:
                 systemData = sqlite3.connect(logConfPath)
-                systemData.text_factory = str
+                #systemData.text_factory = str
                 syscursor = systemData.cursor()
                 for path,data in stillToHash.items():
                     size,mtime,hashes = data
@@ -1160,10 +1163,17 @@ def log(command):
                 return successfullyHashed
 
         realFilesUsedHash = hashEverything(realFilesUsed)
-        realDirectoryWatchHash = hashEverything(realDirectoryWatch) # used to be realDirectoryWatchLS
-        realDirectoryUsedHash = hashEverything(realDirectoryUsed)   # used to be realDirectoryUsedLS
+        realDirectoryWatchHash = hashEverything(realDirectoryWatch)
+        realDirectoryUsedHash = hashEverything(realDirectoryUsed)
         ## We cant hash possiblePaths, because they dont exist... yet :^)
 
+        if settings['debug'][0]:
+          print 'realFilesUsedHash'
+          for x,y in realFilesUsedHash.items(): print x
+          print 'realDirectoryWatchHash'
+          for x,y in realDirectoryWatchHash.items(): print x
+          print 'realDirectoryUsedHash'
+          for x,y in realDirectoryUsedHash.items(): print x
 
         ######################
         ## BACKUP RESOURCES ##
@@ -1222,6 +1232,7 @@ def log(command):
     ##########################################################################################################
 
     runStart            =       time.time()
+    #startTime           =       str(datetime.datetime.now())
     startTime           =       int(time.time() * 1000) # Most things like time as integer representing milliseconds from Unix epoch
     startTimeString     =       time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(startTime/1000)) # Python uses float in seconds...    
     ID                  =       ''.join(random.choice(string.lowercase + string.uppercase + string.digits) for blah in range(6))
@@ -1247,7 +1258,7 @@ def log(command):
 
     stdout = ''
     stderr = ''
-    originalCommand = command # SQLite requires unicode data in the format u'\u2202'...
+    originalCommand = command
     ttyBefore = termios.tcgetattr(sys.stdin)  # We grab the state of the user's terminal, then pop it into raw mode
     tty.setraw(sys.stdin)                     # else we're going to have a bad time (this took FOREVER to figure out)
 
@@ -1279,19 +1290,19 @@ def log(command):
                     if e.errno != errno.EIO: raise
                     del readable[fd]
                 finally:
-                    if fd in readable:
+                    if fd in readable: ## Removed from OSX version. Maybe on purpose?
                         if not data: del readable[fd]
                         else:
-                            if fd == parent[0]: stdout += data # SQLite requires unicode data in the 
-                            else: stderr += data               # format u'\u2202'
+                            if fd == parent[0]: stdout += data.decode('utf-8') # DEV NOTE: You might have to
+                            else: stderr += data.decode('utf-8')               #           remove the decodes
                             if settings['verbose'][0] or not settings['log'][0]:
                                 readable[fd].write(data)
                                 readable[fd].flush()
     finally:
         p.wait()
         for fd in parent: os.close(fd)
-        stdout = None if stdout == '' else stdout
-        stderr = None if stderr == '' else stderr
+        if stdout == '': stdout = None
+        if stderr == '': stderr = None
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, ttyBefore)
 
     if settings['debug'][0]: print '################################################################'
@@ -1326,6 +1337,16 @@ def log(command):
         realDirectoryUsedHashNEW = hashEverything(realDirectoryUsed)
         possiblePathsNEW = hashEverything(possiblePaths)
 
+        if settings['debug'][0]:
+          print 'realFilesUsedHashNEW'
+          for x,y in realFilesUsedHashNEW.items(): print x
+          print 'realDirectoryWatchHashNEW'
+          for x,y in realDirectoryWatchHashNEW.items(): print x
+          print 'realDirectoryUsedHashNEW'
+          for x,y in realDirectoryUsedHashNEW.items(): print x
+          print 'possiblePathsNEW'
+          for x,y in possiblePathsNEW.items(): print x
+
         # realFilesUsed
         for path,data in realFilesUsedHash.items():
             if path in realFilesUsedHashNEW: 
@@ -1336,7 +1357,7 @@ def log(command):
 
         # realDirectoryWatch
         for path,data in realDirectoryWatchHash.items():
-            if path in realDirectoryWatchHashNEW: 
+            if path in realDirectoryWatchHashNEW:
                 if data == realDirectoryWatchHashNEW[path]:
                     #resourceMaybeUsed[path] = data
                     ''' 
@@ -1373,6 +1394,7 @@ def log(command):
         # moved
         # In the future, it might be an idea to check if a resource is deleted at one path, and created at another,
         # as this would signify a move rather than a deletion/creation, assuming it happened in a single command.
+        # also if file created and deleted (because time changed) but location remains the same (and md5 of course) then ignore.
 
 
         # Clean up weird loops/redirects/aliases that lead to things being in both X and MaybeX
@@ -1389,6 +1411,23 @@ def log(command):
             try: resourceMaybeDeleted.pop(key, None)
             except: pass
 
+        if settings['debug'][0]:
+          print 'resourceCreated'
+          print resourceCreated.keys()
+          print 'resourceUsed'
+          print resourceUsed.keys()
+          print 'resourceModified'
+          print resourceModified.keys()
+          print 'resourceDeleted'
+          print resourceDeleted.keys()
+          print 'resourceMaybeCreated'
+          print resourceMaybeCreated.keys()
+          print 'resourceMaybeUsed'
+          print resourceMaybeUsed.keys()
+          print 'resourceMaybeModified'
+          print resourceMaybeModified.keys()
+          print 'resourceMaybeDeleted'
+          print resourceMaybeDeleted.keys()
 
 
         ##############################
@@ -1429,7 +1468,7 @@ def log(command):
         ##########################################################################################################
 
         commandRow = collections.OrderedDict()
-        commandRow['ID']                = str(ID)                                                            # ID
+        commandRow['ID']                = ID                                                                 # ID
         commandRow['startTime']         = startTime                                                          # startTime
         commandRow['Duration']          = float(executionTime)                                               # Duration
         commandRow['User']              = settings['username'][0]                                            # User
@@ -1636,7 +1675,7 @@ def log(command):
             try:
                 userConfPath = os.path.join( settings['offlinePath'][0] , settings['username'][0]+'.conf' )
                 con = sqlite3.connect(userConfPath, timeout=999)
-                con.text_factory = str
+                #con.text_factory = str
                 cur = con.cursor()
                 ## There should be code here to count the number of rows in the 'events' table. 
                 ## If == settings['maxEvents'], update as below, else if less, add, else remove in order.
@@ -1721,7 +1760,7 @@ def log(command):
     Subject: Your command has finished running!
 
     The command: ''' + command + '''
-    Started: ''' + str(startTimeString) + '''
+    Started: ''' + startTimeString + '''
     Duration: ''' + str(executionTime) + '''
     Output:
     ''' + stdout + '''
@@ -1823,8 +1862,8 @@ else:
         [False,doesnt exist (and we cant create it)] and [True,doesnt exist (but we can create it)]
  8) Uninstaller - delete the .log.conf, or even the whole offline/backups directories?
 
- JavaScript:    Can you code for Node.js? If so, check out the server code for this project at ac.gt/log/log-server.html :)
-                Can you code HTML/CSS/JS? If so, check out the webpage code for this project at ac.gt/log/site.html
+    JavaScript Programmers! Can you code for Node.js? If so, check out the server code for this project at ac.gt/log/log-server.html :)
+    Web Developers! Do you know HTML/CSS/JS? If so, check out the webpage code for this project at ac.gt/log/site.html
+
 ##########################################################################################################
 '''
-
