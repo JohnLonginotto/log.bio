@@ -1,7 +1,7 @@
 #!/usr/bin/env python2.7
 # -*- coding: utf-8 -*-
 
-logVersion = 0.1
+logVersion = 0.2
 
 #######################
 ## EDITING THIS FILE ##
@@ -103,11 +103,11 @@ def communicate(endpoint,data,isJSON=False):
     if isJSON == False: data = json.dumps(data)
     if settings['ssl'][0]:
         verify=True
-        protocol = 'https://'
+        protocol = 'https'
     else:
         verify=False
-        protocol = 'http://'
-    return requests.post(protocol + settings['logServer'][0] + '/' + endpoint, data=data, headers=headers, verify=verify).json()
+        protocol = 'http'
+    return requests.post(protocol + '://' + settings['logServer'][0] + '/' + endpoint, data=data, headers=headers, verify=verify).json()
 
 def complete(text, state):
     ## I REALLY wanted to enhance this with colours/etc to make the interactive console
@@ -268,7 +268,7 @@ def systemSetup():
                 print comment; optionsSoFar += 1
         for index in sorted(indexesToDelete, reverse=True): del paths[index]
         while True:
-            if optionsSoFar == 1: print 'Type "1" to install to ' + paths[1] + ', or type a new path:',
+            if optionsSoFar == 1: print 'Type "1" to install to ' + paths[0] + ', or type a new path:',
             elif optionsSoFar == 2: print 'Please choose either "1" or "2", or type a new path:',
             else: print 'Please choose a number from "1" to "' + str(optionsSoFar) + '", or type a new path:'
             chosen = raw_input()
@@ -501,11 +501,11 @@ def newUserConf(userConfPath,newConf,allTables=False):
             "CREATE TABLE IF NOT EXISTS 'events' ("
             "'row' INTEGER PRIMARY KEY,"
             "'ID' TEXT,"
-            "'startTime' timestamp,"
+            "'StartTime' timestamp,"
             "'Duration' REAL,"
             "'User' TEXT,"
-            "'runAs' TEXT,"
-            "'runOn' TEXT,"
+            "'RunAs' TEXT,"
+            "'RunOn' TEXT,"
             "'Command' TEXT,"
             "'Used' TEXT,"
             "'UsedCount' INTEGER,"
@@ -526,11 +526,12 @@ def newUserConf(userConfPath,newConf,allTables=False):
             "'MaybeDeleted' TEXT,"
             "'MaybeDeletedCount' INTEGER,"
             "'Output' TEXT,"
-            "'Errors' TEXT,"
+            "'OutputTimings' TEXT,"
+            "'ExitCode' INT,"
             "'Notes' TEXT,"
             "'Hidden' TEXT default 'Yes',"
-            "'filePaths' TEXT,"
-            "'updatedOn' datetime default current_timestamp"
+            "'FilePaths' TEXT,"
+            "'UpdatedOn' datetime default current_timestamp"
             ")")
         for x in range(0,settings['maxEvents'][0]):
             # We pre-fill the table with 1000 rows and then update the oldest, creating a rotating log.
@@ -1100,6 +1101,7 @@ def log(command):
 
         def localMD5Check(successfullyHashed,stillToHash):
             systemData = sqlite3.connect(logConfPath, timeout=999)
+            #systemData.text_factory = str
             syscursor = systemData.cursor()
             for filePath,fileData in stillToHash.items():
                 fileSize,mtime,hashes = fileData
@@ -1109,6 +1111,7 @@ def log(command):
                     fileData = [fileSize,mtime,hashes]
                     successfullyHashed[filePath] = fileData
                     del stillToHash[filePath]
+            systemData.commit()
             systemData.close()
             return [successfullyHashed,stillToHash]
 
@@ -1128,7 +1131,7 @@ def log(command):
                     for directory, _ , files in os.walk(path):
                         if '/.' in directory: continue
                         for fileName in files:
-                            if fileName[0] == '.': continue
+                            if fileName.startswith('.'): continue
                             fullFileName = os.path.join(directory,fileName)
                             if os.path.isfile(fullFileName):
                                 temp[fullFileName] = [os.path.getsize(fullFileName),os.path.getmtime(fullFileName),None]
@@ -1158,9 +1161,12 @@ def log(command):
                     else:
                         temp[path] = data
                 stillToHash = temp
-                if len(stillToHash) > 0: successfullyHashed,stillToHash = localMD5Check(successfullyHashed,stillToHash)
-                if len(stillToHash) > 0: successfullyHashed,stillToHash = remoteMD5Check(successfullyHashed,stillToHash)
                 if len(stillToHash) > 0:
+                    successfullyHashed,stillToHash = localMD5Check(successfullyHashed,stillToHash)  # check local MD5 lookup
+                if len(stillToHash) > 0:
+                    successfullyHashed,stillToHash = remoteMD5Check(successfullyHashed,stillToHash) # check remote MD5 lookup (if enabled)
+                if len(stillToHash) > 0:
+                    # if we cant lookup the hash, we will have to make it...
                     newHashes = []
                     for path,data in stillToHash.items():
                         size,mtime,hashes = data
@@ -1169,10 +1175,16 @@ def log(command):
                         successfullyHashed[path] = [size,mtime,hashes]
                         newHashes.append( (hashes[0],hashes[1],size,mtime) )
                         if settings['debug'][0]: print 'Finally hashed file: ' + path
+
                     systemData = sqlite3.connect(logConfPath, timeout=999)
+                    #systemData.text_factory = str
                     syscursor = systemData.cursor()
                     for newHash in newHashes:
-                        syscursor.execute("INSERT INTO 'hashLookup' VALUES (?,?,?,?)", newHash)
+                        syscursor.execute("INSERT INTO 'hashLookup' VALUES (?,?,?,?)", newHash) ## If error, read below:
+                    # The bete version of log has the .log.conf as an sqlite database for both the system config and MD5 checksums. This will not
+                    # work in the future. In the future, the log.conf will be a readonly JSON file, and MD5 database will be user-writable, in a directory
+                    # which is user-writable (no sticky bit). The same division (JSON/Sqlite) will be true of the user configs, as they will be hashed 
+                    # (and the hash sent to the server on connect). So /log to have a .config file (read only), and in /offline a MD5.sql database.
                     systemData.commit()
                     systemData.close()
                 return successfullyHashed
@@ -1246,9 +1258,7 @@ def log(command):
     ## again its not fool proof.                                                                            ##
     ##########################################################################################################
 
-    runStart            =       time.time()
-    #startTime           =       str(datetime.datetime.now())
-    startTime           =       int(time.time() * 1000) # Most things like time as integer representing milliseconds from Unix epoch
+    startTime           =       time.time()
     startTimeString     =       time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(startTime/1000)) # Python uses float in seconds...    
     ID                  =       ''.join(random.choice(string.lowercase + string.uppercase + string.digits) for blah in range(6))
 
@@ -1271,18 +1281,17 @@ def log(command):
     ## smoothly...                                                                                          ## 
     ##########################################################################################################
 
-    stdout = ''
-    stderr = ''
+    output = ''
+    outputTimings = collections.defaultdict(int)
     originalCommand = command
     ttyBefore = termios.tcgetattr(sys.stdin)  # We grab the state of the user's terminal, then pop it into raw mode
-
-    #tty.setraw(sys.stdin)                     # else we're going to have a bad time (this took FOREVER to figure out)
-    parent, child = zip(os.openpty(), os.openpty()) # open up a fresh pair of pseudoterminals for both stdout and stderr.
-    readable = { parent[0]: sys.stdout, parent[1]: sys.stderr }
+    #tty.setraw(sys.stdin)                    # else we're going to have a bad time (this took FOREVER to figure out)
+    parent, child = os.openpty()              # open up a single pseudoterminal for both stdout and stderr
+    readable = { parent: sys.stdout }
 
     buf = array.array('h', [0, 0, 0, 0])                            # Set windows size of
     fcntl.ioctl(pty.STDOUT_FILENO, termios.TIOCGWINSZ, buf, True)   # pty to that of the
-    fcntl.ioctl(parent[0], termios.TIOCSWINSZ, buf)                 # parent window
+    fcntl.ioctl(parent, termios.TIOCSWINSZ, buf)                    # parent window
 
     # DEV NOTE: Could add "export IGNOREEOF=1" to the screen commands to prevent Ctrl+D from closing the terminal..?
     if settings['screen'][0]:   command = 'screen -h 10000 -S ' + ID + ' -d -m sh -c \'' + command + ' ; /bin/bash \'' 
@@ -1292,12 +1301,11 @@ def log(command):
         print 'Running: ' + ID + ' - ' + originalCommand
     if settings['debug'][0]: print '\n#################### ACTUAL ######## OUTPUT ####################'
 
-    p = subprocess.Popen(command, stdout=child[0], stderr=child[1], shell=True, executable='/bin/bash')
-    time.sleep(1)
+    p = subprocess.Popen(command, stderr=child, stdout=child, shell=True, executable='/bin/bash')
+    time.sleep(1) # To give child process time to change the window variables (turn on raw mode, etc).
 
-    termios.tcsetattr(sys.stdout, termios.TCSADRAIN, termios.tcgetattr(child[0]) )
-    termios.tcsetattr(sys.stderr, termios.TCSADRAIN, termios.tcgetattr(child[0]) )
-    for fd in child: os.close(fd)
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, termios.tcgetattr(child) )
+    os.close(child)
 
     try:
         while readable:
@@ -1310,16 +1318,15 @@ def log(command):
                     if fd in readable:
                         if not data: del readable[fd]
                         else:
-                            if fd == parent[0]: stdout += data.decode('utf-8') # DEV NOTE: You might have to
-                            else: stderr += data.decode('utf-8')               #           remove the decodes
+                            output += data.decode('utf-8') # DEV NOTE: Is decode utf-8 always OK here?
+                            outputTimings[int(time.time()-startTime)] += len(data.decode('utf-8'))
                             if settings['verbose'][0] or not settings['log'][0]:
                                 readable[fd].write(data)
                                 readable[fd].flush()
     finally:
-        p.wait()
-        for fd in parent: os.close(fd)
-        if stdout == '': stdout = None
-        if stderr == '': stderr = None
+        exitCode = p.wait()
+        os.close(parent)
+        if output == '': output = None
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, ttyBefore)
 
     if settings['debug'][0]: print '################################################################'
@@ -1331,10 +1338,9 @@ def log(command):
     ## I appreciate that this code isnt very clear - if its any consolation it used to be much worse...     ##
     ##########################################################################################################
 
-    runEnd = time.time()
-    executionTime = str(runEnd - runStart)
+    executionTime = time.time() - startTime
 
-    if interactive and float(executionTime) < 5 and settings['log'][0]: thisNeverUsuallyHappens = True
+    if interactive and executionTime < 5 and settings['log'][0]: thisNeverUsuallyHappens = True
     else: thisNeverUsuallyHappens = False
 
     if settings['log'][0]:
@@ -1486,11 +1492,11 @@ def log(command):
 
         commandRow = collections.OrderedDict()
         commandRow['ID']                = ID                                                                 # ID
-        commandRow['startTime']         = startTime                                                          # startTime
-        commandRow['Duration']          = float(executionTime)                                               # Duration
+        commandRow['StartTime']         = int(startTime * 1000)                                              # startTime
+        commandRow['Duration']          = executionTime                                                      # Duration
         commandRow['User']              = settings['username'][0]                                            # User
-        commandRow['runAs']             = settings['userAs'][0]                                              # runAs
-        commandRow['runOn']             = settings['hostname'][0]                                            # runOn
+        commandRow['RunAs']             = settings['userAs'][0]                                              # runAs
+        commandRow['RunOn']             = settings['hostname'][0]                                            # runOn
         commandRow['Command']           = originalCommand                                                    # Command
         commandRow['Used']              = [resourceUsed[x][2][0] for x in resourceUsed]                      # Used
         commandRow['UsedCount']         = len(resourceUsed)                                                  # UsedCount
@@ -1510,11 +1516,12 @@ def log(command):
         commandRow['MaybeModifiedCount']= len(resourceMaybeModified)                                         # MaybeModifiedCount
         commandRow['MaybeDeleted']      = [resourceMaybeDeleted[x][2][0] for x in resourceMaybeDeleted]      # MaybeDeleted
         commandRow['MaybeDeletedCount'] = len(resourceMaybeDeleted)                                          # MaybeDeletedCount
-        commandRow['Output']            = stdout                                                             # Output
-        commandRow['Errors']            = stderr                                                             # Errors
+        commandRow['Output']            = output                                                             # Output
+        commandRow['OutputTimings']     = outputTimings                                                      # OuputTimings
+        commandRow['ExitCode']          = exitCode                                                           # ExitCode
         commandRow['Notes']             = 'None'                                                             # Notes
         commandRow['Hidden']            = 'No'                                                               # Hidden
-        commandRow['filePaths']         = [ [],[] ]                                                          # (relationship property)
+        commandRow['FilePaths']         = [ [],[] ]                                                          # (relationship property)
 
         ## Print out above if debug mode is on, else print out a summary.
         if settings['debug'][0]:
@@ -1539,6 +1546,7 @@ def log(command):
 
         else: 
             print (
+                '(' + str(commandRow['ExitCode']) + ')  ' + 
                 '#[' + str(commandRow['UsedCount']) + ']  ' +
                 '+[' + str(commandRow['CreatedCount'])+'/'+str(commandRow['MaybeCreatedCount'])+']  ' +
                 '~['+str(commandRow['ModifiedCount'])+'/'+str(commandRow['MaybeModifiedCount'])+']  ' +
@@ -1568,74 +1576,74 @@ def log(command):
         for path, data in resourceUsed.items():
             size,mtime,hashes = data
             md5,pHash = hashes
-            commandRow['filePaths'][0].append(md5) ; commandRow['filePaths'][1].append(path)
+            commandRow['FilePaths'][0].append(md5) ; commandRow['FilePaths'][1].append(path)
             File = os.path.basename(path)
             thisBackedUp = 'Yes' if path in backedUp else 'No'
-            resources.append({'md5':md5,'pHash':pHash,'Filesize':size,'LastFileName':File,'BackedUp':thisBackedUp})
+            resources.append({'MD5':md5,'pHash':pHash,'FileSize':size,'LastFileName':File,'BackedUp':thisBackedUp})
 
         for path, data in resourceMaybeUsed.items():
             size,mtime,hashes = data
             md5,pHash = hashes
-            commandRow['filePaths'][0].append(md5) ; commandRow['filePaths'][1].append(path)
+            commandRow['FilePaths'][0].append(md5) ; commandRow['FilePaths'][1].append(path)
             thisBackedUp = 'Yes' if path in backedUp else 'No'
             File = os.path.basename(path)
-            resources.append({'md5':md5,'pHash':pHash,'Filesize':size,'LastFileName':File,'BackedUp':thisBackedUp})
+            resources.append({'MD5':md5,'pHash':pHash,'FileSize':size,'LastFileName':File,'BackedUp':thisBackedUp})
 
         for path, data in resourceCreated.items():
             size,mtime,hashes = data
             md5,pHash = hashes
-            commandRow['filePaths'][0].append(md5) ; commandRow['filePaths'][1].append(path)
+            commandRow['FilePaths'][0].append(md5) ; commandRow['FilePaths'][1].append(path)
             thisBackedUp = 'Yes' if path in backedUp else 'No'
             File = os.path.basename(path)
-            resources.append({'md5':md5,'pHash':pHash,'Filesize':size,'LastFileName':File,'BackedUp':thisBackedUp})
+            resources.append({'MD5':md5,'pHash':pHash,'FileSize':size,'LastFileName':File,'BackedUp':thisBackedUp})
 
         for path, data in resourceMaybeCreated.items():
             size,mtime,hashes = data
             md5,pHash = hashes
-            commandRow['filePaths'][0].append(md5) ; commandRow['filePaths'][1].append(path)
+            commandRow['FilePaths'][0].append(md5) ; commandRow['FilePaths'][1].append(path)
             thisBackedUp = 'Yes' if path in backedUp else 'No'
             File = os.path.basename(path)
-            resources.append({'md5':md5,'pHash':pHash,'Filesize':size,'LastFileName':File,'BackedUp':thisBackedUp})
+            resources.append({'MD5':md5,'pHash':pHash,'FileSize':size,'LastFileName':File,'BackedUp':thisBackedUp})
 
         for path, data in resourceModified.items():
             beforeSize,beforeMtime,beforeHashes = data[0]
             afterSize,afterMtime,afterHashes = data[1]
             beforeMD5,beforePHASH = beforeHashes
             afterMD5,afterPHASH = afterHashes
-            commandRow['filePaths'][0].append(beforeMD5) ; commandRow['filePaths'][1].append(path)
-            commandRow['filePaths'][0].append(afterMD5) ; commandRow['filePaths'][1].append(path)
+            commandRow['FilePaths'][0].append(beforeMD5) ; commandRow['FilePaths'][1].append(path)
+            commandRow['FilePaths'][0].append(afterMD5) ; commandRow['FilePaths'][1].append(path)
             thisBackedUp = 'Yes' if path in backedUp else 'No'
             File = os.path.basename(path)
-            resources.append({'md5':beforeMD5,'pHash':beforePHASH,'Filesize':beforeSize,'LastFileName':File,'BackedUp':thisBackedUp})
-            resources.append({'md5':afterMD5,'pHash':afterPHASH,'Filesize':afterSize,'LastFileName':File,'BackedUp':thisBackedUp})
+            resources.append({'MD5':beforeMD5,'pHash':beforePHASH,'FileSize':beforeSize,'LastFileName':File,'BackedUp':thisBackedUp})
+            resources.append({'MD5':afterMD5,'pHash':afterPHASH,'FileSize':afterSize,'LastFileName':File,'BackedUp':thisBackedUp})
 
         for path, data in resourceMaybeModified.items():
             beforeSize,beforeMtime,beforeHashes = data[0]
             afterSize,afterMtime,afterHashes = data[1]
             beforeMD5,beforePHASH = beforeHashes
             afterMD5,afterPHASH = afterHashes
-            commandRow['filePaths'][0].append(beforeMD5) ; commandRow['filePaths'][1].append(path)
-            commandRow['filePaths'][0].append(afterMD5) ; commandRow['filePaths'][1].append(path)
+            commandRow['FilePaths'][0].append(beforeMD5) ; commandRow['FilePaths'][1].append(path)
+            commandRow['FilePaths'][0].append(afterMD5) ; commandRow['FilePaths'][1].append(path)
             thisBackedUp = 'Yes' if path in backedUp else 'No'
             File = os.path.basename(path)
-            resources.append({'md5':beforeMD5,'pHash':beforePHASH,'Filesize':beforeSize,'LastFileName':File,'BackedUp':thisBackedUp})
-            resources.append({'md5':afterMD5,'pHash':afterPHASH,'Filesize':afterSize,'LastFileName':File,'BackedUp':thisBackedUp})
+            resources.append({'MD5':beforeMD5,'pHash':beforePHASH,'FileSize':beforeSize,'LastFileName':File,'BackedUp':thisBackedUp})
+            resources.append({'MD5':afterMD5,'pHash':afterPHASH,'FileSize':afterSize,'LastFileName':File,'BackedUp':thisBackedUp})
 
         for path, data in resourceDeleted.items():
             size,mtime,hashes = data
             md5,pHash = hashes
-            commandRow['filePaths'][0].append(md5) ; commandRow['filePaths'][1].append(path)
+            commandRow['FilePaths'][0].append(md5) ; commandRow['FilePaths'][1].append(path)
             thisBackedUp = 'Yes' if path in backedUp else 'No'
             File = os.path.basename(path)
-            resources.append({'md5':md5,'pHash':pHash,'Filesize':size,'LastFileName':File,'BackedUp':thisBackedUp})
+            resources.append({'MD5':md5,'pHash':pHash,'FileSize':size,'LastFileName':File,'BackedUp':thisBackedUp})
 
         for path, data in resourceMaybeDeleted.items():
             size,mtime,hashes = data
             md5,pHash = hashes
-            commandRow['filePaths'][0].append(md5) ; commandRow['filePaths'][1].append(path)
+            commandRow['FilePaths'][0].append(md5) ; commandRow['FilePaths'][1].append(path)
             thisBackedUp = 'Yes' if path in backedUp else 'No'
             File = os.path.basename(path)
-            resources.append({'md5':md5,'pHash':pHash,'Filesize':size,'LastFileName':File,'BackedUp':thisBackedUp})
+            resources.append({'MD5':md5,'pHash':pHash,'FileSize':size,'LastFileName':File,'BackedUp':thisBackedUp})
 
 
 
@@ -1666,6 +1674,9 @@ def log(command):
                     'event':commandRow,
                     'resources':resources
                 })
+                print type(data)
+                print data
+                exit()
                 reply = communicate('log',data,True)
                 if reply['success'] == True:
                     unableToSync = False
@@ -1706,17 +1717,18 @@ def log(command):
                 commandRow['MaybeModifiedFrom'] = ','.join(commandRow['MaybeModifiedFrom']) # Them
                 commandRow['MaybeModifiedTo']   = ','.join(commandRow['MaybeModifiedTo'])   #
                 commandRow['MaybeDeleted']      = ','.join(commandRow['MaybeDeleted'])      #
-                commandRow['filePaths']         = json.dumps(commandRow['filePaths'])       ## But this is/was an array of arrays.
+                commandRow['FilePaths']         = json.dumps(commandRow['FilePaths'])       ## But this is/was an array of arrays.
+                commandRow['OutputTimings']     = json.dumps(commandRow['OutputTimings'])   ## And this was a dict.
 
                 cur.execute(
                     # We specify column names explicitly here, because you never know what surprises the future might hold!
                     "UPDATE events SET "
                     "ID=?, "
-                    "startTime=?, "
+                    "StartTime=?, "
                     "Duration=?, "
                     "User=?, "
-                    "runAs=?, "
-                    "runOn=?, "
+                    "RunAs=?, "
+                    "RunOn=?, "
                     "Command=?, "
                     "Used=?, "
                     "UsedCount=?, "
@@ -1737,11 +1749,12 @@ def log(command):
                     "MaybeDeleted=?, "
                     "MaybeDeletedCount=?, "
                     "Output=?, "
-                    "Errors=?, "
+                    "OutputTimings=?, "
+                    "ExitCode=?, "
                     "Notes=?, "
                     "Hidden=?, "
-                    "filePaths=?, "
-                    "updatedOn=current_timestamp "
+                    "FilePaths=?, "
+                    "UpdatedOn=current_timestamp "
                     " WHERE row = (SELECT row FROM events ORDER BY updatedOn ASC LIMIT 1)" # Updates the oldest entry.
                 ,commandRow.values())
                 if unableToSync:
@@ -1779,9 +1792,7 @@ def log(command):
     Started: ''' + startTimeString + '''
     Duration: ''' + str(executionTime) + '''
     Output:
-    ''' + stdout + '''
-    Errors:
-    ''' + stderr + '''
+    ''' + output + '''
 
     Have a great day! :) '''
         try:
