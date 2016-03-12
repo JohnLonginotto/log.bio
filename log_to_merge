@@ -1,0 +1,1888 @@
+#!/usr/bin/env python2.7
+# -*- coding: utf-8 -*-
+
+logVersion = 0.2
+
+#######################
+## EDITING THIS FILE ##
+##########################################################################################################
+## To make system-wide changes to how log runs, edit the '.log.conf' file, found in the same            ##
+## directory as log, or, if this file doesn't exist yet, run log and follow the installation steps.     ##
+##                                                                                                      ##
+## To change how log runs for your user account specifically, login to your logServer website           ##
+## (typically https://log.bio) and edit your config details there.                                      ##
+## If you try to edit the user configuration directly (an SQLite database in the ./offline folder) it   ##
+## will be over-written next time you are connected to the internet and run log, so dont do that :P     ##
+##                                                                                                      ##
+## Finally, editing the code here directly could make updating log a pain. 'Updates' should be as       ##
+## simple as replacing this file with a newer file. So if you want a feature added, chances are you are ##
+## not the only one! Send us a mail, and we'll put your name and code directly into log :)              ##
+##########################################################################################################
+
+# All the external things we need.
+import os
+import pty
+import pwd
+import sys
+import csv
+import tty
+import glob
+#import phd
+import time
+import json
+import array
+import errno
+import fcntl
+import shutil
+import random
+import string
+import select
+import socket
+import hashlib
+import sqlite3
+import smtplib
+import termios
+import datetime
+import readline
+import subprocess
+import collections
+import rlcompleter
+try:
+    import requests
+except ImportError:
+    print '''
+    ERROR: You do not have the python "requests" module installed!
+    If you have pip, you can either install it for everyone with:
+        "sudo pip install requests"
+    or if that doesn't work, install it for just yourself with:
+        "pip install --user requests"
+    If you dont already have pip, check out http://pip.pypa.io and follow the installation instructions :) 
+    '''; exit()
+
+##############
+## Defaults ##
+##########################################################################################################
+## The default settings for this version of log.                                                        ##
+##########################################################################################################
+
+settings = {
+    'username':   [ None,       'If None the name of the user who ran log. If set, the username.conf used.',      'suggest' ],
+    'userAs':     [ None,       'The permissions the user was run as.',                                           'suggest' ],
+    'hostname':   [ None,       'The hostname of the computer.',                                                  'suggest' ],
+    'apikey':     [ None,       'The apikey of the log account data will be logged under',                        'suggest' ],
+    'verbose':    [ False,      'If True, log shows the output of the command it executes.',                      'suggest' ],
+    'screen':     [ False,      'If True, log will execute the command in a PERMANENT screen session.',           'suggest' ],
+    'silent':     [ False,      'If True, log will execute the command in a TEMPORARY screen session.',           'suggest' ],
+    'mail':       [ False,      'If True, after execution log will attempt to e-mail the address in mailTo.',     'suggest' ],
+    'mailTo':     [ None,       'If the mail parameter is True, this is the e-mail address used.',                'suggest' ],
+    'call':       [ False,      'If True, after execution log will attempt to call the phone number in callTo.',  'suggest' ],
+    'callTo':     [ None,       'If the call parameter is True, this is the phone number used.',                  'suggest' ],
+    'text':       [ False,      'If True, after execution log will attempt to SMS the phone number in textTo.',   'suggest' ],
+    'textTo':     [ None,       'If the text parameter is True, this is the phone number used.',                  'suggest' ],
+    'twilio':     [ None,       'A Twilio API key required to use the call/sms features.',                        'suggest' ],
+    'log':        [ True,       'If False, log will not log any results to the log server. ',                     'suggest' ],
+    'ask':        [ False,      'If True, log will ask at the end of execution if this data should be logged.',   'suggest' ],
+    'logServer':  [ 'log.bio',  'The root directory of a log logging and authentication server.',                 'suggest' ],
+    'md5':        [ False,      'If True, files are ALWAYS MD5d before and after execution. No shortcuts!',       'suggest' ],
+    'ssl':        [ True,       'If False, http will be used instead of https. This is not recommended!',         'suggest' ],
+    'shortcutAt': [ 50000,      'The MD5 shortcut will only be tried on files bigger than this value',            'suggest' ],
+    'maxBackup':  [ 1000000000, 'The maximum size of backed up files (in bytes).',                                'suggest' ],
+    'maxEvents':  [ 1000,       'The maximum number of events recorded locally (used by "logged").',              'suggest' ],
+    'debug':      [ False,      'If True, log will print detailed information about insects in the local area.',  'suggest' ],
+    'mailServer': [ None,       'The hostname of a generous mailserver. Often just smtp.yourinstitute.com',       'suggest' ]
+}
+
+#############
+## Globals ##
+##########################################################################################################
+## Some global functions and variables.                                                                 ##
+##########################################################################################################
+
+def communicate(endpoint,data,isJSON=False):
+    headers = {'content-type': 'application/json'}
+    if isJSON == False: data = json.dumps(data)
+    if settings['ssl'][0]:
+        verify=True
+        protocol = 'https'
+    else:
+        verify=False
+        protocol = 'http'
+    return requests.post(protocol + '://' + settings['logServer'][0] + '/' + endpoint, data=data, headers=headers, verify=verify).json()
+
+def complete(text, state):
+    ## I REALLY wanted to enhance this with colours/etc to make the interactive console
+    ## more useful - maybe even eval() of Python (a bit like IPython), but I soon ran
+    ## into the nightmare that is cross-platform shell compatibility. You are very welcome
+    ## to experiment! :)  
+    result = []
+    for thing in glob.glob(text+'*'):
+        if os.path.isdir(thing): result.append(thing + os.sep)
+        else:                    result.append(thing)
+    return (result+[None])[state]
+
+if 'libedit' in readline.__doc__:                           ## OSX
+    readline.parse_and_bind("bind -e")
+    readline.parse_and_bind("bind '\t' rl_complete")
+else:                                                       ## Linux
+    readline.parse_and_bind("tab: complete")
+
+def printColumns(theList):
+    ## I wanted to print the run-time arugments in as compressed as space as possible.
+    ## This is my fairly-ugly solution to print fairly pretty lists (compactly like unix's ls).
+    ## It takes a list of tuples, where the first item in the tuple is what you want to print without
+    ## any unprintable characters (like colour codes), and the second is what you will actually print.
+    ## e.g. [ ('MYSTRING','\033[94mMYSTRING\033[0m'), ... ]
+    ## It is done like this so .ljust() can give the right amount of padding, and also because it
+    ## is very difficult to remove 'unprintables' like colour codes after the event, because as far as
+    ## python is concerned its just string text. It cannot identify 'unprintables' because thats entirely
+    ## up to whatever is printing the string (in our case the terminal) :)
+    ## It has not been tested as well as i'd like, but you are free as always to edit it,
+    ## copy it, paraphrase it into a short story about a boy and his balloon, whatever...
+    theList = sorted(theList, key=lambda tupl: len(tupl[0]))        # Sort based on printed text
+    widthList = [len(x[0]) for x in theList]                        # Make a list of those widths
+    termRows, termCols = os.popen('stty size', 'r').read().split()  # Get terminal width
+    colWidths = [0]
+    # Find the maximum number of columns in a 2D list by trial and error. Also width of each column.
+    for columnsInTry in range(1,999):
+        tempList = widthList[:]
+        perColumn = len(tempList)//columnsInTry              # Minimum number of rows per column
+        columnsPlus = len(tempList)-(perColumn*columnsInTry) # Number of columns with +1 row to make up the remainder
+        trialColWidths = [] # the widths of each column in this try.
+        while columnsInTry != 0:
+            if columnsPlus != 0: rows = perColumn+1; columnsPlus -= 1
+            else: rows = perColumn
+            trialColWidths.append(tempList.pop()) # Item on row 1 is largest item in column.
+            rows -= 1
+            while rows != 0:
+                tempList.pop()
+                rows -= 1
+            columnsInTry -= 1
+        totalWidth = sum(trialColWidths)
+        writeableSpaceWithThisManyColumns = int(termCols) - (len(' | ')*(len(trialColWidths)-1))
+        if totalWidth > writeableSpaceWithThisManyColumns: break
+        else: colWidths = trialColWidths
+    cols = len(colWidths)
+    # Make the 2D list with that many columns:
+    data = [ [] for _ in range(cols) ] # list of lists (with tuples as with/without colour values)
+    perColumn = len(theList)//cols
+    columnsPlus = len(theList)-(perColumn*cols) # As before
+    row,column = 0,0
+    for tupl in reversed(theList):
+        data[column].append(tupl)
+        if columnsPlus > column: rowsInThisColumn = perColumn+1
+        else: rowsInThisColumn = perColumn;
+        row += 1
+        if row == rowsInThisColumn: column += 1; row = 0
+        if column == cols: break
+    totalRows = len(data[0]) # first col always has the max rows
+    for column in data: column.sort(key=lambda tupl: len(tupl[0].split('=>')[0]))
+    #for column in data: column.sort(key=lambda tupl: len(tupl[0])) # order rows in each column by total length
+    for row in range(0,totalRows):
+        column = 0
+        while column != cols:
+            try:
+                sys.stdout.write(data[column][row][1].ljust(colWidths[column]+len(data[column][row][1])-len(data[column][row][0])))
+                if column+1 != cols: sys.stdout.write(' | ')
+            except IndexError: sys.stdout.write(''.ljust(colWidths[column]))
+            column += 1
+        sys.stdout.write('\n')
+    sys.stdout.write('\n')
+
+def printStatus():
+    if online: 
+        print '\n\033[92m[online]\033[0m',
+        if configSyncd: print '\033[92m[config sync]\033[0m',
+        print dataSynced
+    else:      print '\n\033[93m[offline]\033[0m'
+    print '"log" (logging on/off) "cd" (change directory) "sync" (resync) "exit" (exit)'
+    settingsAtRuntime = []
+    for a,b in settings.items():
+        if a in originalSettings:
+            if originalSettings[a][0] == b[0]: colouredValue = '\033[1;30m' + str(b[0]) + '\033[0m'
+            elif b[0] == True:                 colouredValue = '\033[92m'   + str(b[0]) + '\033[0m'
+            elif b[0] == False:                colouredValue = '\033[93m'   + str(b[0]) + '\033[0m'
+            else:                              colouredValue = '\033[94m'   + str(b[0]) + '\033[0m'
+        else:                                  colouredValue = '\033[94m'   + str(b[0]) + '\033[0m'
+        settingsAtRuntime.append( (a+' => '+str(b[0]), a+' => '+colouredValue) )
+    printColumns(settingsAtRuntime)
+
+readline.set_completer(complete)
+readline.set_completer_delims(' \t\n;')
+logPath = os.path.abspath(__file__)
+logConfPath = os.path.join( os.path.dirname(logPath) , '.log.conf' )
+online = False
+configSyncd = False
+originalSettings = settings.copy()
+
+##################
+## System Setup ##
+##########################################################################################################
+## This is the code that WOULD run if the systemSetup() function is called.                             ##
+## Its up here instead of being 'in place' just to keep it seperate for the main log code.              ##
+##########################################################################################################
+def systemSetup():
+
+    print '''
+    Hello, and congratulations on downloading log!
+    It seems that log has not been set up on this system yet. 
+    Lets set it up now :)
+
+    To start, please chose a path to move log to. Ideally this would be /usr/local/bin/ if you are
+    installing log for everyone on the system. Otherwise your home directory or a USB memory stick
+    is a good idea if log will just be used by you.
+    '''
+
+    def checkPath(path,longestPath,optionsSoFar):
+        abspath = os.path.abspath(path)
+        opt = '(' + str(optionsSoFar+1) + ')'
+        if os.path.isdir(abspath) == False:
+            return [False,'    ' + path.ljust(longestPath) + ' [    must be created first    ]']
+        oldPath = None
+        othersCanTraverse = True
+        while abspath != oldPath:
+            if (os.stat(abspath).st_mode & int('0001',8)) == 0: othersCanTraverse = False; break
+            oldPath = abspath
+            abspath = os.path.dirname(abspath)
+        pathPermissions = os.stat(abspath).st_mode & int('0007',8)
+        if os.access(path,os.W_OK) == False:
+            return [False,'    ' + path.ljust(longestPath) + ' [          root only          ]']
+        else:
+            if othersCanTraverse == False:
+                return [True,(opt).ljust(4)+path.ljust(longestPath)+' [ other users cannot see this ]']
+            elif pathPermissions not in [5,7]:
+                return [True,(opt).ljust(4)+path.ljust(longestPath)+' [ other users cannot read/run ]']
+            elif pathPermissions in [2,3,6,7]:
+                return [True,(opt).ljust(4)+path.ljust(longestPath)+' [ other users could overwrite ]']
+            else:
+                return [True,(opt).ljust(4)+path.ljust(longestPath)+' [           perfect           ]']
+
+    def installSomething(paths):
+        paths = list(paths)
+        longestPath = len(max(paths, key=len))
+        optionsSoFar, indexesToDelete = 0,[]
+        for index,path in enumerate(paths):
+            possibleToInstall,comment = checkPath(path,longestPath,optionsSoFar)
+            if possibleToInstall == False: 
+                print comment; indexesToDelete.append(index)
+            else:
+                print comment; optionsSoFar += 1
+        for index in sorted(indexesToDelete, reverse=True): del paths[index]
+        while True:
+            if optionsSoFar == 1: print 'Type "1" to install to ' + paths[0] + ', or type a new path:',
+            elif optionsSoFar == 2: print 'Please choose either "1" or "2", or type a new path:',
+            else: print 'Please choose a number from "1" to "' + str(optionsSoFar) + '", or type a new path:'
+            chosen = raw_input()
+            try:
+                return paths[int(chosen)-1]
+            except ValueError:
+                if chosen == '': continue
+                possibleToInstall,comment = checkPath(chosen,longestPath,optionsSoFar)
+                if possibleToInstall == True: print comment; optionsSoFar += 1; paths.append(chosen)
+                else: print 'Im sorry, but either that path does not exist or you cannot write to it!'
+            except IndexError:
+                print "Sorry, that number isn't valid - please try again! "
+
+    # Paths that log could be installed to:
+    paths = set(['/usr/local/bin','/usr/local/sbin','/bin','/usr/bin','/usr/sbin','/log']) # Common unix paths
+    paths.add(os.path.dirname(logPath))                                                    # Current path of log
+    paths.add(os.getcwd())                                                                 # The current directory
+    if os.environ.get('HOME'): paths.add(os.path.abspath(os.environ.get('HOME')))          # The user's home path
+    if os.environ.get('PATH'): paths.update(os.environ.get('PATH').split(os.pathsep))      # All paths in $PATH
+
+    logNewPath = installSomething(paths)
+    logConfPath = os.path.join(logNewPath, '.log.conf')
+
+    print '''
+    OK, log will be moved to ''' + logNewPath + '''
+
+    You also need to decide where backups (stored in a folder called "backups") will go.
+    If you have root privilages, I personally like to make a directory under the root 
+    directory "/log", although you may prefer your home directory if you are not an admin. 
+    The important thing is that all users of log can see/read this directory, but only you
+    the log installer, can write to it (practically meaning others cant delete/overwrite stuff).
+
+    '''
+
+    # Paths that backups could be installed to:
+    paths = set(['/usr/local/share','/usr/share','/var','/log'])                       # Common unix paths
+    paths.add(os.path.dirname(logPath))                                                # Current path of log
+    paths.add(os.getcwd())                                                             # The current directory
+    paths.add(logNewPath)                                                              # The path previously chosen
+    if os.environ.get('HOME'): paths.add(os.path.abspath(os.environ.get('HOME')))      # The user's home path
+    if os.environ.get('PATH'): paths.update(os.environ.get('PATH').split(os.pathsep))  # All paths in $PATH
+    backupPath = installSomething(paths)
+
+    print '''
+    OK, backed up files will be copied to ''' + os.path.join(backupPath, 'backups') + '''
+
+    Logs are stored on the log server, typically on log.bio unless you run your own.
+    At times it might be impossible to connect to the log server, particularly if you run log
+    on a laptop and you travel a lot. When this happens, logs will be stored temporarily in
+    an "./offline" folder. Also, user configuration files are stored here.
+    The offline folder can be in the same place as the backups folder (again /log is my preference), but
+    it is really important that other users cannot write to this directory - otherwise they could delete
+    user config files and replace them with naughty ones! Ideally, only you (the installer) can write to this directory.
+    '''
+
+    # Paths that offline data could be installed to:
+    paths.add(backupPath)  # The path previously chosen for backups
+    offlinePath = installSomething(paths)
+
+    sys.stdout.write('''
+    OK, offline files will be stored in ''' + os.path.join(backupPath, 'backups') + '''
+
+    Testing for SSL Encryption...''');
+    sys.stdout.flush()
+
+    try:
+        reply = communicate('config',{})
+        print 'all good :)'
+    except requests.exceptions.SSLError:
+        print '''
+
+    ERROR: Oh no! The version of python you are currently running is too old to support SSL encryption!
+    You have two options:
+        1) Upgrade python to a newer version.
+        2) Continue with the configuration, but in the next step suggest all users set ssl to "False"
+
+    '''
+        raw_input('    Hit enter to continue...\n')
+    print '''
+    Finally, as the installer of log on this machine, you can modify the default behaviour of all log
+    users by either "suggesting" or "insisting" log runs with certain parameters.
+    For example, by default log will not backup any file larger than 1 gigabyte. You can override this 
+    however by 'suggesting' that the maximum backup size is, for example, 10Gb. If a user has not set any
+    preference on their maximum backup size, all files less than 10Gb will be backed up. If the user HAS 
+    specified a maximum backup size however, whether it is higher or lower than 10Gb, the user's value 
+    will be used. You can therefore 'insist' that the maximum backup size is 10Gb, and then the user's 
+    settings are ignored for this parameter. If you're unsure what to do right now, don't worry, you can 
+    always delete the .log.conf file and run log again to remake it later :)
+
+    Parameter   Default Value   Comment'''
+
+    for key,value in sorted(settings.items()):
+        print '    ' + key.ljust(11), str(value[0]).ljust(15), str(value[1])
+    print ''
+    while True:
+        parameter = raw_input('Type a parameter name to modify it\'s value, or type "done" to move on: ')
+        if parameter not in settings:
+            if parameter.lower() == 'done': break
+            elif parameter == '': continue
+            else: print 'Sorry, I dont recognize that parameter name. (remeber, parameters are case-sensitive!)'; continue
+        print 'The current value of '+parameter+' is '+str(settings[parameter][0])+'  ('+settings[parameter][2]+')'
+        existingType = type(settings[parameter][0])
+        if existingType == bool: 'Valid values for this parameter are "True" or "False" (case sensitive)'
+        if existingType == int: 'You can have any whole number as a value for this parameter'
+        if existingType == str or settings[parameter][0] == None: 
+            'The value of this parameter can be a string of numbers/letters, or the word "None" for nothing.'
+        while True:
+            newValue = raw_input('Assign a new value to this parameter: ')
+            if newValue == '': continue
+            elif newValue.lower() == 'false': newValue = False
+            elif newValue.lower() == 'true': newValue = True
+            elif newValue.lower() == 'none': newValue = None
+            try:
+                if existingType == str or settings[parameter][0] == None: break
+                else: newValue = existingType(newValue); break
+
+            except ValueError: print 'Sorry, I think you have entered an impossible value for this parameter :('
+        while True:
+            ingest = raw_input('Would you like to suggest or insist this value be used by users? [suggest/insist]: ').lower()
+            if ingest in ['suggest','insist']: break
+            else: print "Sorry just type 'suggest' or 'insist'"
+        settings[parameter] = [newValue, settings[parameter][1], ingest ]
+
+
+
+
+
+    print '''
+
+    OK, thats everything configured!
+
+    We're going to move log from ''' + logPath + ''' 
+                              to ''' + os.path.join(logNewPath,'log') + '''
+    We're going to change its permissions so others can't edit/delete it, but everyone can read/run it.
+    We're going to make a dotfile (''' + logConfPath + ''') with the
+    following settings:
+    '''
+    for key,value in settings.items():
+        print '\t' + key.ljust(11), str(value[0]).ljust(15), str(value[2])
+    print '''
+    And of course we'll make the following directories for your backups and offline data:
+    ''' + os.path.join(backupPath,'backups') + '''
+    ''' + os.path.join(offlinePath,'offline') + '''
+
+    Note: These two folders will also contain the 'sticky bit', which means when a file is written to
+    either of these folders, only the user who wrote the file originally can delete/overwrite it. 
+    '''
+
+    settings['backupPath'] = [os.path.join(backupPath,'backups'), 'Where log will copy backed up files to', 'insist']
+    settings['offlinePath'] = [os.path.join(offlinePath,'offline'), 'Where log will copy unsynced logs and user configs to', 'insist']
+
+    while True:
+        doit = raw_input('Sound good? [yes/no]: ').lower()
+        if doit == 'yes': break
+        if doit == 'no': exit()
+    try:
+        # DEV NOTE: Perms used to be 707 and 703 for backups and offine respectively. Need to check again.
+        os.makedirs(os.path.join(backupPath,'backups'),01777)
+        os.chmod(os.path.join(backupPath,'backups'),01777) # Because python makedirs is broken on OSX.
+        os.makedirs(os.path.join(offlinePath,'offline'),01777)
+        os.chmod(os.path.join(offlinePath,'offline'),01777) # Because python makedirs is broken on OSX.
+    except OSError:
+        if not os.path.isdir(os.path.join(backupPath,'backups')):
+            print '\n\nERROR: I could not create the backups directory :( This is a big problem!'; exit()
+        else:
+            print '''
+    WARN: The backups directory already existed! (but I suspect you already knew that)
+    This isnt really a problem - I just thought you should know.'''
+        if not os.path.isdir(os.path.join(offlinePath,'offline')):
+            print '\n\nERROR: I could not create the offline directory :( This is a big problem!'; exit()
+        else:
+            print '''
+    WARN: The offline directory already existed! (but I suspect you already knew that)
+    This isnt really a problem - I just thought you should know.'''
+
+    os.rename(logPath,os.path.join(logNewPath,'log'))
+    os.chown(os.path.join(logNewPath,'log'), os.getuid(), os.getgid() ) # chown/chgrp log as installing user
+    os.chmod(os.path.join(logNewPath,'log'), 0705) # set permissions to only read & execute
+
+    logConf = json.dumps(settings,sort_keys=True, indent=4)
+    systemData = sqlite3.connect(logConfPath, timeout=999)
+    #systemData.text_factory = str
+    cursor = systemData.cursor()
+    cursor.execute("CREATE TABLE IF NOT EXISTS 'settings' ('settings' TEXT)") # overkill I know, but at
+    cursor.execute("INSERT INTO 'settings' VALUES (?)", (logConf,))           # least everything is together.
+    cursor.execute("CREATE TABLE IF NOT EXISTS 'hashLookup' ('MD5' TEXT,'pHash' TEXT,'size' INT,'mtime' REAL)")
+    cursor.execute("CREATE INDEX lookupIndex on hashLookup (size, mtime)")
+    systemData.commit()
+    systemData.close()
+
+    #with open(logConfPath, 'wb') as outfile:
+    #    outfile.write(logConf)
+
+    print '''
+    ...
+
+    Congratulations - you have sucessfully set up log on this system! :)
+
+    Now when a system user runs log for the first time, they will be asked to enter 
+    an API key, which they can get by visiting '''+settings['logServer'][0]+''' in their browser and registering
+    an account (if they dont already have one).
+
+    You can help out your users by aliasing ''' + os.path.join(logNewPath,'log') + ''' as "log" 
+    so they dont need to type the full path, but this is totally optional.
+
+    Good luck - and happy logging!'''
+    exit()
+
+
+################
+## User Setup ##
+##########################################################################################################
+## This is the code that WOULD run if the userSetup() function is called.                               ##
+## Its up here instead of being 'in place' just to keep it seperate for the main log code.              ##
+##########################################################################################################
+def newUserConf(userConfPath,newConf,allTables=False):
+    global configSyncd
+    configSyncd = True
+    userConf = sqlite3.connect(userConfPath, timeout=999)
+    #userConf.text_factory = str
+    cursor = userConf.cursor()
+    cursor.execute("DROP TABLE IF EXISTS 'settings'")                            # A table with 1 row is
+    cursor.execute("CREATE TABLE 'settings' ('settings' TEXT)")                  # overkill I know, but at
+    cursor.execute( "INSERT INTO 'settings' VALUES (?)", (json.dumps(newConf),)) # least everything is together.
+    if allTables:
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS 'logs' ('ID' TEXT,'data' TEXT)"
+        )
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS 'events' ("
+            "'row' INTEGER PRIMARY KEY,"
+            "'ID' TEXT,"
+            "'startTime' timestamp,"
+            "'Duration' REAL,"
+            "'User' TEXT,"
+            "'runAs' TEXT,"
+            "'runOn' TEXT,"
+            "'Command' TEXT,"
+            "'Used' TEXT,"
+            "'UsedCount' INTEGER,"
+            "'Created' TEXT,"
+            "'CreatedCount' INTEGER,"
+            "'ModifiedFrom' TEXT,"
+            "'ModifiedTo' TEXT,"
+            "'ModifiedCount' INTEGER,"
+            "'Deleted' TEXT,"
+            "'DeletedCount' INTEGER,"
+            "'MaybeUsed' TEXT,"
+            "'MaybeUsedCount' INTEGER,"
+            "'MaybeCreated' TEXT,"
+            "'MaybeCreatedCount' INTEGER,"
+            "'MaybeModifiedFrom' TEXT,"
+            "'MaybeModifiedTo' TEXT,"
+            "'MaybeModifiedCount' INTEGER,"
+            "'MaybeDeleted' TEXT,"
+            "'MaybeDeletedCount' INTEGER,"
+            "'Output' TEXT,"
+            "'Errors' TEXT,"
+            "'Notes' TEXT,"
+            "'Hidden' TEXT default 'Yes',"
+            "'filePaths' TEXT,"
+            "'updatedOn' datetime default current_timestamp"
+            ")")
+        for x in range(0,settings['maxEvents'][0]):
+            # We pre-fill the table with 1000 rows and then update the oldest, creating a rotating log.
+            # Because these dummy rows are all Hidden=yes, we never see them.
+            cursor.execute("INSERT INTO 'events' DEFAULT VALUES")
+        print 'INFO: Successfully created user config at ' + userConfPath
+    userConf.commit()
+    userConf.close()
+
+def userSetup(userConfPath):
+    failed = False
+    while True:
+        accountKey = raw_input('Please paste in your account:key combo: ')
+        if len(accountKey.split(':')) == 2 and len(accountKey.split(':')[1]) == 32: 
+            settings['apikey'][0] = accountKey
+            break
+        else:
+            print 'Sorry, I didnt understand that account:key format.'
+            print 'It should look something like "john:5f4dcc3b5aa765d61d8327deb882cf99"'
+    try:
+        data = { 
+            'apikey'  : settings['apikey'][0],
+            'username': settings['username'][0],
+            'hostname': settings['hostname'][0]
+        }
+        reply = communicate('config',data)
+        if reply['success'] == True:
+            print '\nINFO: Account and API key all good :)'
+            reply['config'] = json.loads(reply['config'])
+            newUserConf(userConfPath,reply['config'],True)
+        elif reply['success'] == False:
+            print 'ERROR: I tried logging in to a log account with:'
+            print 'API key: ' + settings['apikey'][0]
+            print 'Server: ' + settings['logServer'][0]
+            print '\nBut the server did not like those details. Please try again!'
+            userSetup(userConfPath)
+    except requests.exceptions.SSLError:
+        print 'ERROR:    Oh no! The version of python you are running is too old to support SSL encryption!'
+        print '          This means there is no way to securely talk to the log database and verify your API key'
+        print 'SOLUTION: You can either upgrade your version of python (recommended), or you can tell log to'
+        print '          use no encryption by setting the "ssl" parameter to False.'
+        failed = True
+    except ValueError:
+        print 'ERROR: There was an error in contacting ' + settings['logServer'][0]
+        failed = True
+
+    if failed:
+        print '\nYou can still continue installing log (with a default user config) and hope that everything'
+        print 'will work out and get synced up in the future, or you can quit and try and fix the issue first...'
+        choice = raw_input('Continue? [y/n]: ').lower()
+        while True:
+            if choice in ['y', 'ye', 'yes']: newUserConf(userConfPath,{},True); break
+            elif choice in ['n', 'no']: print 'OK, good decision - and good luck! :)'; exit()
+            raw_input('Sorry I didnt understand that - please type either "yes" or "no" :)').lower()
+
+#################################
+## DETERMINE RUN-TIME SETTINGS ##
+##########################################################################################################
+## This is where we figure out what settings log will run with                                          ##
+## The default settings, the .log.conf settings, the user settings, or a combination of all three :)    ##
+## The steps are:                                                                                       ##
+## Read the system settings from .log.conf (always in the same directory as log)                        ##
+##     -- if no .log.conf, run the admin setup                                                          ##
+## If the username in log.conf is None (default), get the username of the user who ran log              ##
+## Look in the "./offline" folder for the [username].conf                                               ##
+##     -- if not found, run the user setup                                                              ##
+## Mix it all together, and bake for 5 minutes at 120C                                                  ##
+##########################################################################################################
+
+def applyConfigs():
+    if os.path.isfile(logConfPath) == False: systemSetup()
+
+    systemData = sqlite3.connect(logConfPath, timeout=999)
+    #systemData.text_factory = str
+    syscursor = systemData.cursor()
+    syscursor.execute("SELECT * FROM 'settings'")
+    logConf = json.loads(syscursor.fetchone()[0])
+    systemData.commit()
+    systemData.close()
+    for key,values in logConf.items():   # The .log.conf settings always override log defaults, but as there
+        settings[key] = values           # might be more options in log defaults (i.e. from updates) we append
+
+    if settings['userAs'][0] == None: settings['userAs'][0] = pwd.getpwuid(os.getuid())[0]
+    if settings['hostname'][0] == None:  settings['hostname'][0] = socket.gethostname()
+    if settings['username'][0] == None:
+        try:    username = os.getlogin()                  # Owner of terminal - this is most often the 
+        except: username = 'screen'                       # 'real' user, unless if no terminal (eg screen)
+        settings['username'][0] = settings['userAs'][0] if username == 'screen' else username
+
+    userConfPath = os.path.join( settings['offlinePath'][0] , settings['username'][0]+'.conf' )
+    if os.path.isfile(userConfPath) == False:
+        print '''
+    This username (''' + settings['username'][0] + ''') is not associated with a log account yet!
+    Since you need a log account on ''' + settings['logServer'][0] + ''' to authenticate with the database,
+    please go there and register an account (it's really quick!).
+    Once you have an account, please enter the account name and generated key in the format "account:key"
+        '''
+        userSetup(userConfPath)
+
+    userConf = sqlite3.connect(userConfPath, timeout=999)
+    #userConf.text_factory = str
+    usrcursor = userConf.cursor()
+    usrcursor.execute("SELECT settings FROM settings")
+    result = usrcursor.fetchone()
+    offlineConfig = json.loads(result[0])
+    for key,value in offlineConfig.items():
+        if value == None:   ## Happens when user wants a system suggested value to be overriden with a runtime value.
+            if key == 'userAs': value = pwd.getpwuid(os.getuid())[0]
+            if key == 'hostname': value = socket.gethostname()
+            if key == 'username':
+                try:    username = os.getlogin()
+                except: username = 'screen'
+                value = pwd.getpwuid(os.getuid())[0] if username == 'screen' else username
+        if key in settings:
+            if settings[key][2] == 'suggest': settings[key][0] = value
+            else: pass # could alert the user here that their setting was overriden by the system?
+        else:
+            settings[key] = [value, 'A setting this version of log does not understand', '?']
+    userConf.commit()
+    userConf.close()
+    return userConfPath,offlineConfig
+
+userConfPath,offlineConfig = applyConfigs()
+
+
+##########
+## SYNC ##
+##########################################################################################################
+## First thing to do is check if there are any files in the ./offline folder that need to be moved to   ##
+## the ./backups folder. This is everything other than .conf files, put there by any user of log :)     ##
+## Why are backups in ./offline? Because some people set ./backups as a remotly mounted directory, and  ##
+## if that connection goes down, files are temporarily stored in offline until they can be copied.      ##
+##                                                                                                      ##
+## Next, we check we have a connection to logDatabase. This is usually log.bio unless you're a hipster  ##
+## who prefers to run their own, organic, gluten-free, logDatabase (get the code at log.bio/server)     ##
+## We do this by asking for a copy of our config. If the reply is good, we compare this config to our   ##
+## offline one and update if nessecary. If we update, we re-run applyConfigs() to make sure we are      ##
+## using the freshest ingredients.                                                                      ##
+##                                                                                                      ##
+## Finally, if we do have a connectino to the logDatabase, we will also upload any old logs that have   ##
+## yet to be synced up.                                                                                 ##
+##########################################################################################################
+
+def syncBackups():
+    for aFile in os.listdir(settings['offlinePath'][0]):
+        if aFile[-5:] == '.conf': continue # DEV NOTE: Would be better to check if a file was a valid md5 hash.
+        elif os.access(os.path.dirname(settings['backupPath'][0]), os.W_OK):
+            fullpath = os.path.join(settings['offlinePath'][0],aFile)
+            os.rename(fullpath,os.path.join(settings['backupPath'][0],aFile))
+
+def syncConfig(userConfPath,offlineConfig):
+    online = False
+    try:
+        data = { 
+            'apikey'  : settings['apikey'][0],
+            'username': settings['username'][0],
+            'hostname': settings['hostname'][0]
+        }
+        reply = communicate('config',data)
+        if reply['success'] == True:
+            online = True
+            if float(reply['logVersion']) > float(logVersion):
+                print 'A new version of log is avalible! (v' + str(logVersion) + ' => v' + str(reply['logVersion']) + ')'
+            reply['config'] = json.loads(reply['config'])
+            if reply['config'] != offlineConfig:
+                newUserConf(userConfPath,reply['config'])
+                userConfPath,offlineConfig = applyConfigs()
+        elif reply['success'] == False:
+            print 'ERROR: I tried logging in to your log account with:'
+            print 'API key:' + settings['apikey'][0]
+            print 'Server:' + settings['logServer'][0]
+            print '\nBut although the server is there, it did not like those details.'
+            while True:
+                accountKey = raw_input('Please paste in your account:key combo: ')
+                if len(accountKey.split(':')) == 2 and len(accountKey.split(':')[1]) == 32: 
+                    settings['apikey'][0] = accountKey
+                    break
+                else:
+                    print 'Sorry, I didnt understand that account:key format.'
+                    print 'It should look something like "john:5f4dcc3b5aa765d61d8327deb882cf99"'
+            userConfPath,offlineConfig,online = syncConfig(userConfPath,offlineConfig)
+        else: 
+            print 'INFO: The logServer ' + settings['logServer'][0] + " replied, but it didn't make sense!?";
+            print '      Your logs will be stored offline for now. Maybe this will fix itself..?';
+    except requests.exceptions.SSLError:
+        print 'INFO: Oh no! This version of python does not support SSL encryption!'
+        print '      We will store your logs offline for now, but to sync them either'
+        print '      update your python, or run log with --ssl in the future :('
+    except requests.exceptions.ConnectionError:
+        if settings['debug'][0]: print 'INFO: No connection to the log server. Will sync logs when next online..'
+    return userConfPath,offlineConfig,online
+
+def syncData(online):
+    # This happens once when log runs, and whenever user calls 'sync'
+    # DEV NOTE: Really this should try to sync in bulk to '/sync' or something similar,
+    # and return the IDs that worked to delete from logs based on ID.
+    if online:
+        userConf = sqlite3.connect(userConfPath, timeout=999)
+        #userConf.text_factory = str
+        userCursor = userConf.cursor()
+        userCursor.execute("CREATE TABLE IF NOT EXISTS 'logs' ('ID' TEXT, 'data' TEXT)")
+        userCursor.execute("SELECT * FROM logs")
+        rows = userCursor.fetchall()
+        if rows != []:
+            syncSuccess = None
+            for row in rows:
+                ID = row[0]
+                data = row[1]
+                try:
+                    reply = communicate('log',data,True)
+                    if reply['success'] == True:
+                        userCursor.execute("DELETE from logs where ID=?",(ID,))
+                        userConf.commit()
+                        if syncSuccess == False: syncSuccess = 'partial'
+                        else: syncSuccess = True
+                    elif reply['success'] == False:
+                        if reply['reason'] == 'Node Already Exists':
+                            userCursor.execute("DELETE from logs where ID=?",(ID,))
+                            userConf.commit()
+                            if syncSuccess == False: syncSuccess = 'partial'
+                            else: syncSuccess = True
+                        else:
+                            if syncSuccess == True: syncSuccess = 'partial'
+                            else: syncSuccess = False
+                            if settings['debug'][0]: print reply['reason']
+                    else:
+                        if syncSuccess == True: syncSuccess = 'partial'
+                        else: syncSuccess = False
+                        if settings['debug'][0]:
+                            print 'ERROR: The logServer replied, but it did not make sense.'
+                            print '       Either the logServer is not configured correctly, or this log client is too old/new?!'
+                except Exception as e:
+                    if syncSuccess == True: syncSuccess = 'partial'
+                    else: syncSuccess = False
+                    if settings['debug'][0] == True:
+                        print 'ERROR: The was an error which prevented log from syncing to the logServer. It was:'
+                        print e
+                        print 'log will continue without syncing now, but if you could send this error to us that would be great :)'
+            userConf.commit()
+            userConf.close()
+            if syncSuccess == True:      return '\033[92m[synced cache]\033[0m'
+            if syncSuccess == False:     return '\033[93m[unable to sync cache]\033[0m'
+            if syncSuccess == 'partial': return '\033[94m[unable to sync all cache]\033[0m'
+        else:
+            userConf.commit()
+            userConf.close()
+            return ''
+
+userConfPath,offlineConfig,online = syncConfig(userConfPath,offlineConfig)
+
+###################
+## PARSE COMMAND ##
+##########################################################################################################
+## Here we try to figure out what the user is trying to run. This is not as easy as you might think,    ##
+## because log doesn't see the command the user typed - it sees what the shell (like Bash) gives it.    ##
+## For example, the user might type:                                                                    ##
+## localhost$> log shopping.pl "cookies muffins"                                                        ##
+## log would see two parameters - 'shopping.pl' and 'cookies muffins'                                   ##
+## if log combines them without adding the quotes, we get:                                              ##
+## localhost$> log shopping.pl cookies muffins                                                          ##
+## Which might not work. This gets even more important when the user uses quotes to prevent the         ##
+## shell intepreting special characters like > or |                                                     ##
+## Because of this, we can't use python modules like optparse or argparse to gather the user arguments, ##
+## because they just add another layer of muckery to deal with when re-creating the user's original     ##
+## command. We dont want to understand the arguments - we want to reconstruct them (quotes and all!)    ##
+## In an ideal world, log would BE THE SHELL so working out the original command is easier, but that    ##
+## will have to wait until the community accepts command/resource logging as the norm.                  ##
+##########################################################################################################
+
+
+## Check that the log output isnt being redirected. This is almost always a bad thing.
+if os.fstat(0) != os.fstat(1):
+    no = open('/dev/tty', 'w+')
+    sys.stdout = no # no no no no
+    print '''
+    LOG ERROR: You tried to re-directed log's output to another process!
+               This probably means you forgot to "quote" your command properly, resulting in
+               shell operators like ">" or "|" being interpreted by the shell and not by log.
+               For example:
+               >log cat shopping.txt | grep muffins
+               should be:
+               >log "cat shopping.txt | grep muffins"
+               I can't fix this either, because the shell does not tell me about what happens after
+               the redirect, so to play it safe we are going to bail out right now without even trying
+               to run the command or logging anything. You can try again using either " or ' around your 
+               command, or alternatively just run log without a command (--flags are OK though) and enter
+               your command on the interactive console just as you would if you typed it into the shell :) \n''' ; exit()
+
+## Get the command line parameters and the command:
+
+flags = {}
+command = []
+flagFinding = True
+for arg in sys.argv[1:]:
+    if flagFinding:
+        if arg.lstrip('+') != arg:
+            if arg.lstrip('+').lower() in [setting.lower() for setting in settings]: 
+                flags[arg.lstrip('+').lower()] = True; continue
+            else: flagFinding = None
+        elif arg.lstrip('-') != arg: 
+            if arg.lstrip('-').lower() in [setting.lower() for setting in settings]: 
+                flags[arg.lstrip('-').lower()] = False; continue
+            else: flagFinding = None
+        elif arg.lstrip('!') != arg: 
+            if arg.lstrip('!').lower() in [setting.lower() for setting in settings]: 
+                flags[arg.lstrip('!').lower()] = None; continue
+            else: flagFinding = None
+        elif len(arg.split('=')) == 2:
+            key,value = arg.split('=')
+            if key.lower() in [setting.lower() for setting in settings]:
+                flags[key.lower()] = value; continue
+            else: flagFinding = None
+        if flagFinding == None:
+            print 'ERROR: The argument ' + arg + ' looks like a parameter for log, but I do not recognize it..?'
+            print '       I will exit without running the command, and hopfully this will be an easy fix :)'; exit()
+        else: flagFinding = False # stop looking for flags.
+    if ' ' in arg:
+        if all(x in arg for x in [' ','"']): arg = "'" + str(arg) + "'"   # quote with ' if " is present
+        elif all(x in arg for x in [' ',"'"]): arg = '"' + str(arg) + '"' # quote with " if ' is present
+        else: arg = "'" + str(arg) + "'" ## otherwise just always quote with '
+        ## This will fail to correctly parse something like: command flag='stuff with spaces' 
+        ## as 'flag=stuff with spaces'. But if the whole commmand is quoted then it's OK.
+    command.append(arg)
+
+## Set the command line flags (if system hasnt insisted they stay as they are):
+for flag,value in flags.items():
+    for setting in settings:
+        if setting.lower() == flag: flag = setting # to get the camelCase flag name. I know. PEP8. I know. I feel your scorn -_-;
+    ## True/False settings:
+    if type(settings[flag][0]) == bool:
+        if type(value) != bool:
+            print 'ERROR: You have tried to set the ' + flag + ' parameter to something other than ++True or --False!'
+            print '       I will exit now before your command is run so you can adjust :)'; exit()
+        elif settings[flag][2] == 'suggest': settings[flag][0] = value
+        elif settings[flag][0] != value:
+            print 'ERROR: You tried to set '+flag+' but this machine\'s configuration insists it remains as ' + str(settings[flag][0])
+            print '      I will exit now before your command is run so you can think about what to do next :)'; exit()
+
+    ## Numerical settings:
+    elif type(settings[flag][0]) == int:
+        try: value = int(value)
+        except ValueError:
+            print 'ERROR: You have tried to set the ' + flag + ' parameter to something other than a number!'
+            print '       I will exit now before your command is run so you can adjust :)'; exit()
+        if settings[flag][2] == 'suggest': settings[flag][0] = value
+        elif settings[flag][0] != value:
+            print 'ERROR: You tried to set '+flag+' but this machine\'s configuration insists it remains at ' + str(settings[flag][0])
+            print '      I will exit now before your command is run so you can think about what to do next :)'; exit()
+
+    ## Everything else is either a string, or None (for not used, or generate at run-time)
+    elif (type(value) == str) or (type(value) == unicode) or value == None: # DEV NOTE: Recently added unicode typecheck
+        if settings[flag][2] == 'suggest': settings[flag][0] = value
+        else:
+            print 'ERROR: You tried to set '+flag+' but this machine\'s configuration insists it remains at ' + str(settings[flag][0])
+            print '      I will exit now before your command is run so you can think about what to do next :)'; exit()
+    else:
+        print 'ERROR: You have tried to set the '+flag+' parameter to something other than a string or other run-time generated value.'
+        print '      I will exit now before your command is run so you can think about what to do next :)'; exit()
+
+## Check flag compatibility:
+if settings['mail'][0] == True:
+    if type(settings['mailTo'][0]) != str and type(settings['mailTo'][0]) != unicode:
+        print '''
+    You need to provide an e-mail address, otherwise who am I going to mail? :)
+    Add one to your user config via the website, or run log with "log mailTo=someone@somewhere.com [command]"
+    You have 10 seconds to hit Ctrl-C if this was a mistake - else i'll continue without mail....'''
+        for x in range(1,10): sys.stdout.write('.');sys.stdout.flush();time.sleep(1); settings['mail'][0] = False
+    elif type(settings['mailServer'][0]) != str and type(settings['mailServer'][0]) != unicode:
+        print '''
+    You need to provide the address of an SMTP mailserver that will send our e-mail!
+    Add one to your user config via the website, or run log with "log mailserver=mail.work.com [command]"
+    You have 10 seconds to hit Ctrl-C if this was a mistake - else i'll continue without mail....'''
+        for x in range(1,10): sys.stdout.write('.');sys.stdout.flush();time.sleep(1); settings['mail'][0] = False
+if settings['call'][0] == True:
+    if type(settings['callTo'][0]) != str and type(settings['callTo'][0]) != unicode:
+        print '''
+    You need to provide a phone number, otherwise who am I going to call? :)
+    Add one to your user config via the website, or run log with "log callTo=+441234567890 [command]"
+    You have 10 seconds to hit Ctrl-C if this was a mistake - else i'll continue without mail....'''
+        for x in range(1,10): sys.stdout.write('.');sys.stdout.flush();time.sleep(1); settings['call'][0] = False
+if settings['text'][0] == True:
+    if type(settings['textTo'][0]) != str and type(settings['textTo'][0]) != unicode:
+        print '''
+    You need to provide a phone number, otherwise who am I going to text message? :)
+    Add one to your user config via the website, or run log with "log textTo=+441234567890 [command]"
+    You have 10 seconds to hit Ctrl-C if this was a mistake - else i'll continue without mail....'''
+        for x in range(1,10): sys.stdout.write('.');sys.stdout.flush();time.sleep(1); settings['text'][0] = False
+if (settings['call'][0] == True) or (settings['text'][0] == True):
+    if type(settings['twilio'][0]) != str and type(settings['twilio'][0]) != unicode:
+        print '''
+    If you wish to receive phone calls or text messages on event completion, you must first create an account on
+    twilio (twilio.com) and add your twilio SID:AUTH tokens to either your online user configuration, or via the
+    command line in the form "log twilio=AC8802bc4e6c07e12b70459a50d86eb7c9:4d965383ee14fe1bcc276432146b7107 [command...]" 
+    For the record, neither ac.gt nor log.bio has anything to do with twilio. Twilio is just like Skype in how it
+    works as a user, but unlike skype it can be scripted :)'''
+        for x in range(1,10):
+            sys.stdout.write('.');sys.stdout.flush();time.sleep(1);settings['call'][0] = False;settings['text'][0] = False
+
+
+syncBackups()
+dataSynced = syncData(online)
+
+def log(command):
+    if settings['log'][0]:
+
+        ##############################
+        ## GATHER LIST OF RESOURCES ##
+        ##########################################################################################################
+        ## The logic here is somewhat complicated and constantly under refinement. If you have thoughts on how  ##
+        ## to do this bit better, i'd love to hear from you!                                                    ##
+        ##                                                                                                      ##
+        ## A Resource is a file used in the execution of a command. No distinction is made between executable   ##
+        ## files and data files - they are all resources. But without writing an entire operating system called ##
+        ## logOS, how do we know which files will be used during a command's execution so we can MD5 those      ##
+        ## files before/after the command has been run? Well, we take a best guess...                           ##
+        ##                                                                                                      ##
+        ## - Arguments which are paths to existing files get put into the realFilesUsed list.                   ##
+        ##   This is most likely an executable file or input data file.                                         ##
+        ## - The current working directory goes into the realDirectoryWatch list, as well as all of the         ##
+        ##   containing directories of the files in the realFilesUsed list.                                     ##
+        ##   If a file in this directory is added, removed or modified by the time execution has finised, we'll ##
+        ##   record it. However, since it was not explicitly mentioned in the command, we can't be 100% sure    ##
+        ##   that this has anything to do with the program execution.                                           ##
+        ## - Arguments which are paths to existing directories get put into the realDirectoryUsed list.         ##
+        ##   Here we can be more confident that files added/removed/modified were as a result of the command.   ##
+        ## - Arguments which are NOT paths, but could become paths during execution, go to possiblePaths.       ##
+        ##   This typically contains output files which will only exist after execution.                        ##
+        ## - Arguments which are NOT paths, but could be intepreted by the shell as a path to an executable     ##
+        ##   (like 'echo' is '/bin/echo') also get put into realFilesUsed, but not their containing directory   ##
+        ##   does not go to the realDirectoryWatch list.                                                        ##
+        ##                                                                                                      ##
+        ## Obviously, which one of these lists a resource is put into determines what status it can get after   ##
+        ## command execution. The possible status' are:                                                         ##
+        ## realFilesUsed      | md5 before/after | Files get 'Used' / 'Modified' / 'Deleted'                    ##
+        ## realDirectoryWatch | ls  before/after | Files get 'MaybeCreated' / 'MaybeModified' / 'MaybeDeleted'  ##
+        ## realDirectoryUsed  | ls  before/after | Files get 'Created' / 'Modified' / 'Deleted' / 'MaybeUsed'   ##
+        ## possiblePaths      | ls & md5 after   | If file, 'Created'. If folder, files inside get 'Created'    ##
+        ##########################################################################################################
+
+        realFilesUsed = set()
+        realDirectoryWatch = set()
+        realDirectoryUsed = set()
+        possiblePaths = set()
+        executablePaths = os.environ.get('PATH').split(os.pathsep)  # for finding alias (lke 'echo' as '/bin/echo')
+        #realDirectoryWatch.add(os.getcwd())                         # current directory in watch list
+
+        def isResource(argument):
+            argument = argument.strip(' ')
+            argument = os.path.expanduser(argument)                 # Expand tilde, because abspath wont.
+            if os.path.isfile(argument):                            # Check if argument is an existing file.
+                argument = os.path.abspath(argument)
+                argumentDir = os.path.dirname(argument)
+                realFilesUsed.add(argument)
+                realDirectoryWatch.add(argumentDir)
+                return True
+            if os.path.isdir(argument):                             # Not a file, but maybe a directory?
+                argument = os.path.abspath(argument)
+                realDirectoryUsed.add(argument)
+                return True
+            if os.access(os.path.dirname(argument), os.W_OK):       # Not a file or dir, but COULD be a path?
+                argument = os.path.abspath(argument)
+                possiblePaths.add(argument)
+                return True
+            for path in executablePaths:                            # OK its not a path - but maybe its an alias?
+                trialPath = os.path.join(path,argument)
+                if os.path.isfile(trialPath):
+                    trialPath = os.path.abspath(trialPath)
+                    realFilesUsed.add(trialPath)
+                    return True # Theres no point in checking all the paths, because the shell wont.
+            return False
+
+        ## Check for resources in command path:
+        levelOne = command.split("'")
+        for thisLevelOne in levelOne:
+            if isResource(thisLevelOne): continue
+            else:
+                levelTwo = thisLevelOne.split('"')
+                for thisLevelTwo in levelTwo:
+                        if isResource(thisLevelTwo): continue
+                        else:
+                            levelThree = thisLevelTwo.split(';')
+                            for thisLevelThree in levelThree:
+                                if isResource(thisLevelThree): continue
+                                else:
+                                    levelFour = thisLevelThree.split(' ')
+                                    for thisLevelFour in levelFour:
+                                        if isResource(thisLevelFour): continue
+                                        elif len(thisLevelFour.split('=')) == 2:
+                                            isResource(thisLevelFour.split('=')[1])
+
+        if settings['debug'][0]:
+            print '\nrealFilesUsed:'
+            if len(realFilesUsed) == 0: print 'None'
+            else:
+                for thing in realFilesUsed: print thing
+            print '\nrealDirectoryWatch:'
+            if len(realDirectoryWatch) == 0: print 'None'
+            else:
+                for thing in realDirectoryWatch: print thing
+            print '\nrealDirectoriesUsed:'
+            if len(realDirectoryUsed) == 0: print 'None'
+            else:
+                for thing in realDirectoryUsed: print thing
+            print '\npossiblePaths:'
+            if len(possiblePaths) == 0: print 'None'
+            else:
+                for thing in possiblePaths: print thing
+            print ''
+
+        ##########################
+        ## HASH THOSE RESOURCES ##
+        ##########################################################################################################
+        ## MD5'ing a file generates a unique fingerprint for that file. If just 1 byte of that file is modified ##
+        ## the resulting fingerprint is totally different. This is great for making sure our inputs are what we ##
+        ## think they are, particularly when we attempt to repeat the analysis many years down the line.        ##
+        ##                                                                                                      ##
+        ## pHashing, or "perceptual hashing" is a similar concept, but slightly different. Essentially, it is a ##
+        ## fingerprint like an MD5 hash, but similar files generate similar hashes. In fact changing 1 byte is  ##
+        ## unlikely to change the hash at all, unless the file is quite small. While it is not particularly     ##
+        ## useful without the MD5, the two work very well together - allowing us to indentify file changes, and ##
+        ## also the size of the change, just from the hashes.                                                   ##
+        ##                                                                                                      ##
+        ## Only problem is, hashing large files can take up a bit of time. Not a huge amount of time, but long  ##
+        ## enough to frustrate an eager researcher - particularly if it is a large file that is used regularly. ##
+        ## So we have to plan when to hash, and when try a shortcut. The only shortcut that seems to be         ##
+        ## reliable right now, is after we have hashed a file the long way, to save it's file size and last     ##
+        ## modification time to the .log.conf database. If we want to hash the file again, we can look up the   ##
+        ## size and 'mtime' in this database, and if we get a hit we can be fairly confident that its the same  ##
+        ## file that we hashed earlier.                                                                         ##
+        ## The chance of getting a match by chance is so incredibly small that this works 99.9% of the time.    ##
+        ## However, it isn't foolproof - it is theoretically possible for a file to be modified without the     ##
+        ## last modification date being changed, or, two different files of exactly the same file size being    ##
+        ## modified at the same time. But because we only try shortcuts for very large files, this is less of a ##
+        ## problem than you might expect.                                                                       ##
+        ##                                                                                                      ##
+        ## One idea for an upgrade would be to MD5 the first/last few bytes of the file, in addition to the     ##
+        ## above, or utilize ext4 nanosecond-precision file timestamps. But we have to see...                   ##
+        ##########################################################################################################
+
+        def getHashes(path):
+            # It is much quicker to read the file once and calculate both kinds of hash
+            # simultaneously. In fact we basically get the MD5 for 'free' since disk IO is
+            # so much slower than calculation speed. If you can think of another statistic
+            # that would be significantly informative, please let us know!!
+            try:
+                md5 = hashlib.md5()
+                bytesPerBlock = os.path.getsize(path)/50.
+                blocks = []
+                pHash = ''
+                blocksDone = 0
+                with open(path,'rb') as f:
+                    for blockNumber in range(1,51):
+                        blocksToDo = int(bytesPerBlock*blockNumber)-blocksDone
+                        blocksDone += blocksToDo
+                        chunk = f.read(blocksToDo)
+                        if chunk == '': blocks.append(0); continue
+                        md5.update(chunk)
+                        #blocks.append(sum(ord(x) for x in f.read(blocksToDo))/blocksToDo)  # OK
+                        #blocks.append(sum(map(ord, f.read(blocksToDo)))/blocksToDo)        # Fast
+                        #blocks.append(sum(bytearray(chunk))/blocksToDo)                    # Faster
+                        blocks.append(sum(array.array('B', chunk))/blocksToDo)              # Fastest
+                md5Hash = md5.hexdigest()
+                for block in blocks: pHash += hex(block)[2:].rjust(2,'0')
+                return (md5Hash,pHash)
+            except OSError:
+                return None
+
+        def localMD5Check(successfullyHashed,stillToHash,syscursor):
+            for filePath,fileData in stillToHash.items():
+                fileSize,mtime,hashes = fileData
+                syscursor.execute("SELECT MD5,pHash from 'hashLookup' WHERE size=? and mtime=?", (fileSize,mtime))
+                hashes = syscursor.fetchone()
+                if hashes:
+                    fileData = [fileSize,mtime,hashes]
+                    successfullyHashed[filePath] = fileData
+                    del stillToHash[filePath]
+            return [successfullyHashed,stillToHash]
+
+        def remoteMD5Check(successfullyHashed,stillToHash,syscursor):
+            ## The idea was thrown around to support external lookup databases, but we'll have to see...
+            return [successfullyHashed,stillToHash]
+
+        def hashEverything(stillToHash):
+            # Get files from directories
+            temp = {}
+            for path in stillToHash:
+                if os.path.isfile(path):
+                    # We dont ignore dotfiles if they are mentioned explicitly
+                    temp[path] = [os.path.getsize(path),os.path.getmtime(path),None]
+                elif os.path.isdir(path):
+                    # DEV NOTE: Need to put in a recursion step, like settings['maxFileRecursion'][0] = 5, to go up to 5 subfolders.
+                    for directory, _ , files in os.walk(path):
+                        if '/.' in directory: continue
+                        for fileName in files:
+                            if fileName.startswith('.'): continue
+                            fullFileName = os.path.join(directory,fileName)
+                            if os.path.isfile(fullFileName):
+                                temp[fullFileName] = [os.path.getsize(fullFileName),os.path.getmtime(fullFileName),None]
+                else:
+                    # possiblePaths or deleted paths are just quietly dropped at this point.
+                    pass
+
+            stillToHash = temp; temp = {}
+            successfullyHashed = {}
+
+            if settings['md5'][0]: # always re-calculate hash
+                for path,data in stillToHash.items():
+                    size,mtime,hashes = data
+                    hashes = getHashes(path)
+                    if hashes == None: continue                                    # File was deleted between seeing it and hashing it.
+                    successfullyHashed[path] = [size,mtime,hashes]
+                    if settings['debug'][0]: print 'Hashed file: ' + path
+                return successfullyHashed
+            else:
+                systemData = sqlite3.connect(logConfPath, timeout=999)
+                #systemData.text_factory = str
+                syscursor = systemData.cursor()
+
+                for path,data in stillToHash.items():
+                    size,mtime,hashes = data
+                    if int(size) < settings['shortcutAt'][0]:                      # Quicker to hash
+                        hashes = getHashes(path)
+                        if hashes == None: continue                                # File was deleted
+                        successfullyHashed[path] = [size,mtime,hashes]
+                        if settings['debug'][0]: print 'Quickly hashed file: ' + path
+                    else:
+                        temp[path] = data
+                stillToHash = temp; temp = {}
+                if len(stillToHash) > 0: 
+                    successfullyHashed,stillToHash = localMD5Check(successfullyHashed,stillToHash,syscursor)  # check local MD5 lookup
+                if len(stillToHash) > 0:
+                    successfullyHashed,stillToHash = remoteMD5Check(successfullyHashed,stillToHash,syscursor) # check remote MD5 lookup (if enabled)
+                if len(stillToHash) > 0:
+                    # if we cant lookup the hash, we have make it...
+                    systemData.close() # we might be a long time hashing files, so lets close our connection so others can write.
+                    newHashes = []
+                    for path,data in stillToHash.items():
+                        size,mtime,hashes = data
+                        hashes = getHashes(path)
+                        if hashes == None: continue                                # File was deleted
+                        successfullyHashed[path] = [size,mtime,hashes]
+                        newHashes.append(hashes[0],hashes[1],size,mtime)
+                        if settings['debug'][0]: print 'Finally hashed file: ' + path
+                systemData = sqlite3.connect(logConfPath, timeout=999)
+                #systemData.text_factory = str
+                syscursor = systemData.cursor()
+                for newHash in newHashes: syscursor.execute("INSERT INTO 'hashLookup' VALUES (?,?,?,?)", newHash)
+                systemData.commit()
+                systemData.close()
+                return successfullyHashed
+
+        realFilesUsedHash = hashEverything(realFilesUsed)
+        realDirectoryWatchHash = hashEverything(realDirectoryWatch)
+        realDirectoryUsedHash = hashEverything(realDirectoryUsed)
+        ## We cant hash possiblePaths, because they dont exist... yet :^)
+
+        if settings['debug'][0]:
+          print 'realFilesUsedHash'
+          for x,y in realFilesUsedHash.items(): print x
+          print 'realDirectoryWatchHash'
+          for x,y in realDirectoryWatchHash.items(): print x
+          print 'realDirectoryUsedHash'
+          for x,y in realDirectoryUsedHash.items(): print x
+
+        ######################
+        ## BACKUP RESOURCES ##
+        ##########################################################################################################
+        ## Having been a long-term Apple fanboy, I thought backing up was some sort of complicated process that ##
+        ## required hundreds of patents, proprietary transfer formats, and $300 worth of software/hardware.     ##
+        ## Turns out, its actually just 'copying stuff', which is weird because Apple is usually good at that.. ##
+        ##########################################################################################################
+
+        backedUp = []
+        def backupResources(toBackUp,location):
+            for path, data in toBackUp.items():
+                size,mtime,hashes = data
+                theoreticalPath = os.path.join(location,hashes[0])
+                if size <= settings['maxBackup'][0]:
+                    if os.path.isfile(theoreticalPath):
+                        backedUp.append(path)
+                        if settings['debug'][0]: print 'File "' + path + '" was already backed up.'
+                    else:
+                        shutil.copy(path,theoreticalPath)
+                        backedUp.append(path)
+                        if settings['debug'][0]: print 'File "' + path + '" was backed up!!'
+                else:
+                    if settings['debug'][0]: print 'File "' + path + '" exceeded the maxBackup size in your settings.'
+
+        if os.access(settings['backupPath'][0], os.W_OK):
+            if settings['debug'][0]: print 'Backing up realFilesUsed to ' + settings['backupPath'][0]
+            backupResources(realFilesUsedHash, settings['backupPath'][0])
+            if settings['debug'][0]: print 'Backing up realDirectoryWatch files...'
+            backupResources(realDirectoryWatchHash, settings['backupPath'][0])
+            if settings['debug'][0]: print 'Backing up realDirectoryUsed files...'
+            backupResources(realDirectoryUsedHash, settings['backupPath'][0])
+        elif os.access(settings['offlinePath'][0], os.W_OK):
+            if settings['debug'][0]: print 'FAILED TO WRITE TO '+settings['backupPath'][0]+' - will use '+settings['offlinePath'][0]
+            if settings['debug'][0]: print 'Backing up realFilesUsed files...'
+            backupResources(realFilesUsedHash, settings['offlinePath'][0])
+            if settings['debug'][0]: print 'Backing up realDirectoryWatch files...'
+            backupResources(realDirectoryWatchHash, settings['offlinePath'][0])
+            if settings['debug'][0]: print 'Backing up realDirectoryUsed files...'
+            backupResources(realDirectoryUsedHash, settings['offlinePath'][0])
+        else:
+            if settings['debug'][0]: print 'FAILED TO BACKUP ANYTHING TO ANYWHERE :(' 
+
+        ## DEV NOTE: Impliment SSH or HTTP upload in the future? Or users just mount remote drive as ./backup
+        ##           and if that fails goes to local ./offline anyway for sync later.
+        ##           Dont forget to add code to the second backup round if you do this!
+
+
+    ###################################
+    ## PRE-EXECUTION DATA COLLECTION ##
+    ##########################################################################################################
+    ## Right now, the ID is generated by log "randomly", and as the number of users is small we are very    ##
+    ## Unlikely to ever get a collision. But in the future, we will want to request and ID from the         ##
+    ## logServer to make sure that doesnt happen. Offline users would still need to generate their own, so  ##
+    ## again its not fool proof.                                                                            ##
+    ##########################################################################################################
+
+    runStart            =       time.time()
+    #startTime           =       str(datetime.datetime.now())
+    startTime           =       int(time.time() * 1000) # Most things like time as integer representing milliseconds from Unix epoch
+    startTimeString     =       time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(startTime/1000)) # Python uses float in seconds...    
+    ID                  =       ''.join(random.choice(string.lowercase + string.uppercase + string.digits) for blah in range(6))
+
+
+    ######################
+    ## EXECUTE COMMAND! ##
+    ##########################################################################################################
+    ## The first part is simple enough - if the user wants to run their command in a screen, we add some    ##
+    ## extra stuff to the command to make it so.                                                            ##
+    ## The second part is a lot more complicated. Because some programs (like log itself) know when their   ##
+    ## outputs are being redirected to a pipe, they might behave differently than expected. They might not  ##
+    ## print out their status messages or they might even refuse to run at all (if they are interactive)    ##
+    ## So the solution is to run all the subprocessed commands through a pty - a pseudoterminal - which is  ##
+    ## a bit like a pipe, except it also has a screen width/height value, amongst other things. As far as   ##
+    ## the subprocessed command is concerned, it's attached to a real terminal. Because there is so much    ##
+    ## legacy-burden in the world of terminals, pipes, etc, theres a good chance this doesn't always work.  ##
+    ## To quote Brian Fantana, 60% of the time it works every time - but when it failes, it's because the   ##
+    ## user is trying to log editing a file in vim/nano/etc and the parent/child screens come out of sync   ##
+    ## Hopefully, someone with a better knowledge of all this stuff can help us out and make it all run     ##
+    ## smoothly...                                                                                          ## 
+    ##########################################################################################################
+
+    stdout = ''
+    stderr = ''
+    originalCommand = command
+    ttyBefore = termios.tcgetattr(sys.stdin)  # We grab the state of the user's terminal, then pop it into raw mode
+    #tty.setraw(sys.stdin)                    # else we're going to have a bad time (this took FOREVER to figure out)
+    parent, child = os.openpty()              # open up a single pseudoterminal for both stdout and stderr
+    readable = { parent: sys.stdout }
+
+    buf = array.array('h', [0, 0, 0, 0])                            # Set windows size of
+    fcntl.ioctl(pty.STDOUT_FILENO, termios.TIOCGWINSZ, buf, True)   # pty to that of the
+    fcntl.ioctl(parent, termios.TIOCSWINSZ, buf)                    # parent window
+
+    # DEV NOTE: Could add "export IGNOREEOF=1" to the screen commands to prevent Ctrl+D from closing the terminal..?
+    if settings['screen'][0]:   command = 'screen -h 10000 -S ' + ID + ' -d -m sh -c \'' + command + ' ; /bin/bash \'' 
+    elif settings['silent'][0]: command = 'screen -S ' + ID + ' -d -m sh -c \'' + command + ' \''
+    if settings['verbose'][0] == True and settings['silent'][0] == False and settings['log'] == True:
+        print '\nStarted at:' , startTimeString
+        print 'Running: ' + ID + ' - ' + originalCommand
+    if settings['debug'][0]: print '\n#################### ACTUAL ######## OUTPUT ####################'
+
+    p = subprocess.Popen(command, stdin=child, stderr=child, stdout=child, shell=True, executable='/bin/bash')
+    time.sleep(1) # To give child process time to change the window variables (turn on raw mode, etc).
+
+    termios.tcsetattr(sys.stdout, termios.TCSADRAIN, termios.tcgetattr(child) )
+    termios.tcsetattr(sys.stderr, termios.TCSADRAIN, termios.tcgetattr(child) )
+    os.close(child)
+
+    try:
+        while readable:
+            for fd in select.select(readable, [], [])[0]:
+                try: data = os.read(fd, 1024)
+                except OSError as e:
+                    if e.errno != errno.EIO: raise
+                    del readable[fd]
+                finally:
+                    if fd in readable:
+                        if not data: del readable[fd]
+                        else:
+                            stdout += data.decode('utf-8') # DEV NOTE: You might have to
+                            if settings['verbose'][0] or not settings['log'][0]:
+                                readable[fd].write(data)
+                                readable[fd].flush()
+    finally:
+        returnCode = p.wait()
+        os.close(parent)
+        if stdout == '': stdout = None
+        if stderr == '': stderr = None
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, ttyBefore)
+
+    if settings['debug'][0]: print '################################################################'
+
+    ####################################
+    ## POST-EXECUTION DATA COLLECTION ##
+    ##########################################################################################################
+    ## Now we stop the stopwatch, and rehash all the resources again to see if anything has changed.        ##
+    ## I appreciate that this code isnt very clear - if its any consolation it used to be much worse...     ##
+    ##########################################################################################################
+
+    runEnd = time.time()
+    executionTime = str(runEnd - runStart)
+
+    if interactive and float(executionTime) < 5 and settings['log'][0]: thisNeverUsuallyHappens = True
+    else: thisNeverUsuallyHappens = False
+
+    if settings['log'][0]:
+        ## Get new information on the resources:
+        resourceCreated = {}
+        resourceUsed = {}
+        resourceModified = {}
+        resourceDeleted = {}
+        resourceMaybeCreated = {}
+        resourceMaybeUsed = {}
+        resourceMaybeModified = {}
+        resourceMaybeDeleted = {}
+
+        if settings['debug'][0]: print'\nRehashing Resources!'
+        realFilesUsedHashNEW = hashEverything(realFilesUsed)
+        realDirectoryWatchHashNEW = hashEverything(realDirectoryWatch)
+        realDirectoryUsedHashNEW = hashEverything(realDirectoryUsed)
+        possiblePathsNEW = hashEverything(possiblePaths)
+
+        if settings['debug'][0]:
+          print 'realFilesUsedHashNEW'
+          for x,y in realFilesUsedHashNEW.items(): print x
+          print 'realDirectoryWatchHashNEW'
+          for x,y in realDirectoryWatchHashNEW.items(): print x
+          print 'realDirectoryUsedHashNEW'
+          for x,y in realDirectoryUsedHashNEW.items(): print x
+          print 'possiblePathsNEW'
+          for x,y in possiblePathsNEW.items(): print x
+
+        # realFilesUsed
+        for path,data in realFilesUsedHash.items():
+            if path in realFilesUsedHashNEW: 
+                if data == realFilesUsedHashNEW[path]: resourceUsed[path] = data
+                else: resourceModified[path] = [ data, realFilesUsedHashNEW[path] ]
+            else:
+                resourceDeleted[path] = data
+
+        # realDirectoryWatch
+        for path,data in realDirectoryWatchHash.items():
+            if path in realDirectoryWatchHashNEW:
+                if data == realDirectoryWatchHashNEW[path]:
+                    #resourceMaybeUsed[path] = data
+                    ''' 
+                    If this is uncommented, resources in the current working directory will
+                    be set as "Maybe Used", even though they probably weren't. But who knows, maybe
+                    the executed program does use files in the current working directory?
+                    Often the command being run is also in the local directory, in which case
+                    surrounding files will be marked as "Maybe Used", so this is really about
+                    files in the current working directory which are not mentioned in the
+                    command at all. What do we do with them?
+                    '''
+                else: resourceMaybeModified[path] = [ data, realDirectoryWatchHashNEW[path] ]
+            else:
+                resourceMaybeDeleted[path] = data
+        for path,data in realDirectoryWatchHashNEW.items():
+            if path not in realDirectoryWatchHash:
+                resourceMaybeCreated[path] = data
+
+        # realDirectoryUsed
+        for path,data in realDirectoryUsedHash.items():
+            if path in realDirectoryUsedHashNEW: 
+                if data == realDirectoryUsedHashNEW[path]:
+                    resourceMaybeUsed[path] = data
+                else: resourceModified[path] = [ data, realDirectoryUsedHashNEW[path] ]
+            else:
+                resourceDeleted[path] = data
+        for path,data in realDirectoryUsedHashNEW.items():
+            if path not in realDirectoryUsedHash:
+                resourceCreated[path] = data
+
+        # possiblePaths
+        for path,data in possiblePathsNEW.items(): resourceCreated[path] = data
+
+        # moved
+        # In the future, it might be an idea to check if a resource is deleted at one path, and created at another,
+        # as this would signify a move rather than a deletion/creation, assuming it happened in a single command.
+        # also if file created and deleted (because time changed) but location remains the same (and md5 of course) then ignore.
+
+
+        # Clean up weird loops/redirects/aliases that lead to things being in both X and MaybeX
+        for key,value in resourceCreated.items():
+            try: resourceMaybeCreated.pop(key, None)
+            except: pass
+        for key,value in resourceUsed.items():
+            try: resourceMaybeUsed.pop(key, None)
+            except: pass
+        for key,value in resourceModified.items():
+            try: resourceMaybeModified.pop(key, None)
+            except: pass
+        for key,value in resourceDeleted.items():
+            try: resourceMaybeDeleted.pop(key, None)
+            except: pass
+
+        if settings['debug'][0]:
+          print 'resourceCreated'
+          print resourceCreated.keys()
+          print 'resourceUsed'
+          print resourceUsed.keys()
+          print 'resourceModified'
+          print resourceModified.keys()
+          print 'resourceDeleted'
+          print resourceDeleted.keys()
+          print 'resourceMaybeCreated'
+          print resourceMaybeCreated.keys()
+          print 'resourceMaybeUsed'
+          print resourceMaybeUsed.keys()
+          print 'resourceMaybeModified'
+          print resourceMaybeModified.keys()
+          print 'resourceMaybeDeleted'
+          print resourceMaybeDeleted.keys()
+
+
+        ##############################
+        ## BACKUP RESOURCES (AGAIN) ##
+        ##########################################################################################################
+        ## Such backup. Much repeated.                                                                          ##
+        ##########################################################################################################
+
+        backedUp = []
+        if os.access(settings['backupPath'][0], os.W_OK):
+            if settings['debug'][0]: print 'Backing up resourceCreated to ' + settings['backupPath'][0]
+            backupResources(resourceCreated, settings['backupPath'][0])
+            if settings['debug'][0]: print 'Backing up resourceMaybeCreated files...'
+            backupResources(resourceMaybeCreated, settings['backupPath'][0])
+        elif os.access(settings['offlinePath'][0], os.W_OK):
+            if settings['debug'][0]: print 'FAILED TO WRITE TO '+settings['backupPath'][0]+' but can write to '+settings['offlinePath'][0]
+            if settings['debug'][0]: print 'Backing up resourceCreated files...'
+            backupResources(resourceCreated, settings['offlinePath'][0])
+            if settings['debug'][0]: print 'Backing up resourceMaybeCreated files...'
+            backupResources(resourceMaybeCreated, settings['offlinePath'][0])
+        else:
+            if settings['debug'][0]: print 'FAILED TO BACKUP ANYTHING TO ANYWHERE :('
+
+        ###########################
+        ## PREPARE DATA - EVENTS ##
+        ##########################################################################################################
+        ## Fundamentally, we are storing two kinds of data:                                                     ##
+        ##     Resources        (information on input files, outputs files, and executable files), and          ##
+        ##     Execution Events (a time when a collection of resources were used on the command line together)  ##
+        ##                                                                                                      ##
+        ## The Execution Events are very straight forward to log, so we will look at them first.                ##
+        ## We basically just want a table with information about the execution. Imagine if the 'history'        ##
+        ## command showed us not only what commands where run, but also when, who by, what files were used,     ##
+        ## created, modified, deleted, how long execution took, what the output was, etc.                       ##
+        ## We put this data into an SQLite table (also used for the user config) in ./offline as a single row   ##
+        ## of information (which can be accessed via the "logged" command). This row is also JSON'd to the main ##
+        ## log database which we'll discuss in the next info box.                                               ## 
+        ##########################################################################################################
+
+        commandRow = collections.OrderedDict()
+        commandRow['ID']                = ID                                                                 # ID
+        commandRow['startTime']         = startTime                                                          # startTime
+        commandRow['Duration']          = float(executionTime)                                               # Duration
+        commandRow['User']              = settings['username'][0]                                            # User
+        commandRow['runAs']             = settings['userAs'][0]                                              # runAs
+        commandRow['runOn']             = settings['hostname'][0]                                            # runOn
+        commandRow['Command']           = originalCommand                                                    # Command
+        commandRow['Used']              = [resourceUsed[x][2][0] for x in resourceUsed]                      # Used
+        commandRow['UsedCount']         = len(resourceUsed)                                                  # UsedCount
+        commandRow['Created']           = [resourceCreated[x][2][0] for x in resourceCreated]                # Created
+        commandRow['CreatedCount']      = len(resourceCreated)                                               # CreatedCount
+        commandRow['ModifiedFrom']      = [resourceModified[x][0][2][0] for x in resourceModified]           # ModifiedFrom
+        commandRow['ModifiedTo']        = [resourceModified[x][1][2][0] for x in resourceModified]           # ModifiedTo
+        commandRow['ModifiedCount']     = len(resourceModified)                                              # ModifiedCount
+        commandRow['Deleted']           = [resourceDeleted[x][2][0] for x in resourceDeleted]                # Deleted
+        commandRow['DeletedCount']      = len(resourceDeleted)                                               # DeletedCount
+        commandRow['MaybeUsed']         = [resourceMaybeUsed[x][2][0] for x in resourceMaybeUsed]            # MaybeUsed
+        commandRow['MaybeUsedCount']    = len(resourceMaybeUsed)                                             # MaybeUsedCount
+        commandRow['MaybeCreated']      = [resourceMaybeCreated[x][2][0] for x in resourceMaybeCreated]      # MaybeCreated
+        commandRow['MaybeCreatedCount'] = len(resourceMaybeCreated)                                          # MaybeCreatedCount
+        commandRow['MaybeModifiedFrom'] = [resourceMaybeModified[x][0][2][0] for x in resourceMaybeModified] # MaybeModifiedFrom
+        commandRow['MaybeModifiedTo']   = [resourceMaybeModified[x][1][2][0] for x in resourceMaybeModified] # MaybeModifiedTo
+        commandRow['MaybeModifiedCount']= len(resourceMaybeModified)                                         # MaybeModifiedCount
+        commandRow['MaybeDeleted']      = [resourceMaybeDeleted[x][2][0] for x in resourceMaybeDeleted]      # MaybeDeleted
+        commandRow['MaybeDeletedCount'] = len(resourceMaybeDeleted)                                          # MaybeDeletedCount
+        commandRow['Output']            = stdout                                                             # Output
+        commandRow['Errors']            = stderr                                                             # Errors
+        commandRow['Notes']             = 'None'                                                             # Notes
+        commandRow['Hidden']            = 'No'                                                               # Hidden
+        commandRow['filePaths']         = [ [],[] ]                                                          # (relationship property)
+
+        ## Print out above if debug mode is on, else print out a summary.
+        if settings['debug'][0]:
+            print 'Command Row:\n   ',
+            for key,value in commandRow.items(): print key.ljust(20),str(value)
+            print 'Resources Created:\n   ',
+            for key,value in resourceCreated.items(): print key.ljust(20),value
+            print 'Resources Used:\n   ',
+            for key,value in resourceUsed.items(): print key.ljust(20),value
+            print 'Resources Modified:\n   ',
+            for key,value in resourceModified.items(): print key.ljust(20),value
+            print 'Resources Deleted:\n   ',
+            for key,value in resourceDeleted.items(): print key.ljust(20),value
+            print 'Resources Maybe Created:\n   ',
+            for key,value in resourceMaybeCreated.items(): print key.ljust(20),value
+            print 'Resources Maybe Used:\n   ',
+            for key,value in resourceMaybeUsed.items(): print key.ljust(20),value
+            print 'Resources Maybe Modified:\n   ',
+            for key,value in resourceMaybeModified.items(): print key.ljust(20),value
+            print 'Resources Maybe Deleted:\n   ',
+            for key,value in resourceMaybeDeleted.items(): print key.ljust(20),value
+
+        else: 
+            print (
+                '#[' + str(commandRow['UsedCount']) + ']  ' +
+                '+[' + str(commandRow['CreatedCount'])+'/'+str(commandRow['MaybeCreatedCount'])+']  ' +
+                '~['+str(commandRow['ModifiedCount'])+'/'+str(commandRow['MaybeModifiedCount'])+']  ' +
+                '-['+str(commandRow['DeletedCount'])+'/'+str(commandRow['MaybeDeletedCount'])+']'       )
+
+        ##############################
+        ## PREPARE DATA - RESOURCES ##
+        ##########################################################################################################
+        ## Resources are quite different to Execution Events however. log is unique in that we dont just        ##
+        ## store the hashes, filesize, path, etc, of the resources (which you could store in a regular table),  ##
+        ## we also store their relationship to the execution event.                                             ##
+        ##                                                                                                      ##
+        ## You cannot effectively store this sort of information in a table without, at some point, having a    ##
+        ## variable number of 'things' in a single column - like a list of all the resources in an execution    ##
+        ## event, or a list of execution events that used the same resource. This makes working with the table  ##
+        ## really slow and unituitive. Its MUCH better to store this sort of data in a graph database, since    ##
+        ## this is exactly what we're dealing with here - a graph :) A network of files, connected by execution ##
+        ## events!                                                                                              ##
+        ## But until graph databases become more popular, it is unlikely that everyone looking to use log is    ##
+        ## going to have graph software installed on their machine. We can but only dream. Instead, we'll pack  ##
+        ## all this information up into a table (in JSON) and send it to our dedicated graph database server :D ##
+        ##########################################################################################################
+
+        # Create both a list of dicts (for JSON)
+        resources = []
+
+        for path, data in resourceUsed.items():
+            size,mtime,hashes = data
+            md5,pHash = hashes
+            commandRow['filePaths'][0].append(md5) ; commandRow['filePaths'][1].append(path)
+            File = os.path.basename(path)
+            thisBackedUp = 'Yes' if path in backedUp else 'No'
+            resources.append({'md5':md5,'pHash':pHash,'Filesize':size,'LastFileName':File,'BackedUp':thisBackedUp})
+
+        for path, data in resourceMaybeUsed.items():
+            size,mtime,hashes = data
+            md5,pHash = hashes
+            commandRow['filePaths'][0].append(md5) ; commandRow['filePaths'][1].append(path)
+            thisBackedUp = 'Yes' if path in backedUp else 'No'
+            File = os.path.basename(path)
+            resources.append({'md5':md5,'pHash':pHash,'Filesize':size,'LastFileName':File,'BackedUp':thisBackedUp})
+
+        for path, data in resourceCreated.items():
+            size,mtime,hashes = data
+            md5,pHash = hashes
+            commandRow['filePaths'][0].append(md5) ; commandRow['filePaths'][1].append(path)
+            thisBackedUp = 'Yes' if path in backedUp else 'No'
+            File = os.path.basename(path)
+            resources.append({'md5':md5,'pHash':pHash,'Filesize':size,'LastFileName':File,'BackedUp':thisBackedUp})
+
+        for path, data in resourceMaybeCreated.items():
+            size,mtime,hashes = data
+            md5,pHash = hashes
+            commandRow['filePaths'][0].append(md5) ; commandRow['filePaths'][1].append(path)
+            thisBackedUp = 'Yes' if path in backedUp else 'No'
+            File = os.path.basename(path)
+            resources.append({'md5':md5,'pHash':pHash,'Filesize':size,'LastFileName':File,'BackedUp':thisBackedUp})
+
+        for path, data in resourceModified.items():
+            beforeSize,beforeMtime,beforeHashes = data[0]
+            afterSize,afterMtime,afterHashes = data[1]
+            beforeMD5,beforePHASH = beforeHashes
+            afterMD5,afterPHASH = afterHashes
+            commandRow['filePaths'][0].append(beforeMD5) ; commandRow['filePaths'][1].append(path)
+            commandRow['filePaths'][0].append(afterMD5) ; commandRow['filePaths'][1].append(path)
+            thisBackedUp = 'Yes' if path in backedUp else 'No'
+            File = os.path.basename(path)
+            resources.append({'md5':beforeMD5,'pHash':beforePHASH,'Filesize':beforeSize,'LastFileName':File,'BackedUp':thisBackedUp})
+            resources.append({'md5':afterMD5,'pHash':afterPHASH,'Filesize':afterSize,'LastFileName':File,'BackedUp':thisBackedUp})
+
+        for path, data in resourceMaybeModified.items():
+            beforeSize,beforeMtime,beforeHashes = data[0]
+            afterSize,afterMtime,afterHashes = data[1]
+            beforeMD5,beforePHASH = beforeHashes
+            afterMD5,afterPHASH = afterHashes
+            commandRow['filePaths'][0].append(beforeMD5) ; commandRow['filePaths'][1].append(path)
+            commandRow['filePaths'][0].append(afterMD5) ; commandRow['filePaths'][1].append(path)
+            thisBackedUp = 'Yes' if path in backedUp else 'No'
+            File = os.path.basename(path)
+            resources.append({'md5':beforeMD5,'pHash':beforePHASH,'Filesize':beforeSize,'LastFileName':File,'BackedUp':thisBackedUp})
+            resources.append({'md5':afterMD5,'pHash':afterPHASH,'Filesize':afterSize,'LastFileName':File,'BackedUp':thisBackedUp})
+
+        for path, data in resourceDeleted.items():
+            size,mtime,hashes = data
+            md5,pHash = hashes
+            commandRow['filePaths'][0].append(md5) ; commandRow['filePaths'][1].append(path)
+            thisBackedUp = 'Yes' if path in backedUp else 'No'
+            File = os.path.basename(path)
+            resources.append({'md5':md5,'pHash':pHash,'Filesize':size,'LastFileName':File,'BackedUp':thisBackedUp})
+
+        for path, data in resourceMaybeDeleted.items():
+            size,mtime,hashes = data
+            md5,pHash = hashes
+            commandRow['filePaths'][0].append(md5) ; commandRow['filePaths'][1].append(path)
+            thisBackedUp = 'Yes' if path in backedUp else 'No'
+            File = os.path.basename(path)
+            resources.append({'md5':md5,'pHash':pHash,'Filesize':size,'LastFileName':File,'BackedUp':thisBackedUp})
+
+
+
+        #########################
+        ## ACTUALLY STORE DATA ##
+        ##########################################################################################################
+        ## Some users are very shy, and dont want to log their command until they know it worked.               ##
+        ## Perhaps they just got out of a complicated relationship and aren't ready to commit just yet?         ##
+        ## Or maybe they have been hurt in the past by other loggers, and just want to take it slow...          ##
+        ## Whatever the reason, we give those people an oppertunity to review the command's output (hopefully   ##
+        ## they used +verbose) and then decide if logging is right for them.                                    ##
+        ##########################################################################################################
+
+        if settings['ask'][0] or thisNeverUsuallyHappens:
+            if thisNeverUsuallyHappens: choice = raw_input('That was quick - are you sure you want to log it? [Y/n] ').strip().lower()
+            else: choice = raw_input('Command execution has finished! Would you like to log it? [Y/n] ').strip().lower()
+            while True:
+                if choice in ['', 'y', 'ye', 'yes']: thisNeverUsuallyHappens = False; break
+                elif choice in ['n', 'no']: break
+                choice = raw_input('Sorry I did\'t understand that - please type either "yes" or "no" :)').lower()
+
+        if settings['log'][0] and thisNeverUsuallyHappens == False:
+
+            ## First try syncing to the logServer
+            try:
+                data = json.dumps({ 
+                    'apikey':settings['apikey'][0],
+                    'event':commandRow,
+                    'resources':resources
+                })
+                reply = communicate('log',data,True)
+                if reply['success'] == True:
+                    unableToSync = False
+                elif reply['success'] == False:
+                    unableToSync = True
+                    #print reply['reason']
+                else:
+                    print 'ERROR: The logServer replied, but it did not make sense.'
+                    print '       Either the logServer is not configured correctly, or this log client is too old/new?!'
+                    unableToSync = True
+            except Exception as e:
+                if settings['debug'][0]:
+                    print 'ERROR: There was an error which prevented log from syncing to the logServer. It was:'
+                    print e
+                    print 'log will continue without syncing now, but if you could send this error to us that would be great :)'
+                else:
+                    print '\033[93m[cached]\033[0m'
+                unableToSync = True
+            if unableToSync == False: print '\033[92m[logged]\033[0m', syncData(online) 
+
+            ## Write the execution event to the oldest row in the ./offline database.
+            ## If the above sync didnt work, also write the data object
+            try:
+                userConfPath = os.path.join( settings['offlinePath'][0] , settings['username'][0]+'.conf' )
+                con = sqlite3.connect(userConfPath, timeout=999)
+                #con.text_factory = str
+                cur = con.cursor()
+                ## There should be code here to count the number of rows in the 'events' table. 
+                ## If == settings['maxEvents'], update as below, else if less, add, else remove in order.
+
+                commandRow['Used']              = ','.join(commandRow['Used'])              # These
+                commandRow['Created']           = ','.join(commandRow['Created'])           # Are
+                commandRow['ModifiedFrom']      = ','.join(commandRow['ModifiedFrom'])      # All
+                commandRow['ModifiedTo']        = ','.join(commandRow['ModifiedTo'])        # Arrays
+                commandRow['Deleted']           = ','.join(commandRow['Deleted'])           # So
+                commandRow['MaybeUsed']         = ','.join(commandRow['MaybeUsed'])         # We
+                commandRow['MaybeCreated']      = ','.join(commandRow['MaybeCreated'])      # Join
+                commandRow['MaybeModifiedFrom'] = ','.join(commandRow['MaybeModifiedFrom']) # Them
+                commandRow['MaybeModifiedTo']   = ','.join(commandRow['MaybeModifiedTo'])   #
+                commandRow['MaybeDeleted']      = ','.join(commandRow['MaybeDeleted'])      #
+                commandRow['filePaths']         = json.dumps(commandRow['filePaths'])       ## But this is/was an array of arrays.
+
+                cur.execute(
+                    # We specify column names explicitly here, because you never know what surprises the future might hold!
+                    "UPDATE events SET "
+                    "ID=?, "
+                    "startTime=?, "
+                    "Duration=?, "
+                    "User=?, "
+                    "runAs=?, "
+                    "runOn=?, "
+                    "Command=?, "
+                    "Used=?, "
+                    "UsedCount=?, "
+                    "Created=?, "
+                    "CreatedCount=?, "
+                    "ModifiedFrom=?, "
+                    "ModifiedTo=?, "
+                    "ModifiedCount=?, "                                # spaaaaace
+                    "Deleted=?, "
+                    "DeletedCount=?, "
+                    "MaybeUsed=?, "
+                    "MaybeUsedCount=?, "
+                    "MaybeCreated=?, "
+                    "MaybeCreatedCount=?, "
+                    "MaybeModifiedFrom=?, "
+                    "MaybeModifiedTo=?, "
+                    "MaybeModifiedCount=?, "
+                    "MaybeDeleted=?, "
+                    "MaybeDeletedCount=?, "
+                    "Output=?, "
+                    "Errors=?, "
+                    "Notes=?, "
+                    "Hidden=?, "
+                    "filePaths=?, "
+                    "updatedOn=current_timestamp "
+                    " WHERE row = (SELECT row FROM events ORDER BY updatedOn ASC LIMIT 1)" # Updates the oldest entry.
+                ,commandRow.values())
+                if unableToSync:
+                    cur.execute("INSERT INTO 'logs' VALUES (?,?)", (commandRow['ID'],data) )
+                con.commit()
+                con.close()
+            except sqlite3.Error, e:
+                print 'ERROR: Something went wrong saving your logs to the ./offline directory on your system.'
+                print 'The exact error was:'
+                print str(e)
+                if unableToSync:
+                    print '''
+                    Because we also couldnt connect to the logServer, this means NOTHING was 
+                    logged for this command, and the only record of it ever happening is below...
+                    '''
+                    print data
+                else:
+                    print 'Dont worry - we still managed to save the logs to the logServer.'
+                    print 'If you have no unsynced logs (check online, or the .conf file directly) then I would'
+                    print 'recommend deleting your user config and re-running log to hard-reset everything :)'
+                print 'If you have questions, send us a message or chat with us via log.bio :)'
+
+
+    ##########################
+    ## NOTIFICATION STATION ##
+    ##########################################################################################################
+    ## Choo choo.                                                                                           ##
+    ##########################################################################################################
+
+    if settings['mail'][0] == True:
+        message = 'From: LOG <' + mailFrom + '> \n To: User <' + mailTo + '''>
+    Subject: Your command has finished running!
+
+    The command: ''' + command + '''
+    Started: ''' + startTimeString + '''
+    Duration: ''' + str(executionTime) + '''
+    Output:
+    ''' + stdout + '''
+    Errors:
+    ''' + stderr + '''
+
+    Have a great day! :) '''
+        try:
+            mailTime = smtplib.SMTP(settings['mailServer'][0])
+            mailTime.sendmail('@'.join(('log',mailTo.split('@')[1])), mailTo, message)
+        except:
+            print 'Could not send alert e-mail :('
+
+    if settings['call'][0] or settings['text'][0]:
+        if settings['twilio'][0][:2] == 'AC':
+            AC = settings['twilio'][0].split(':')[0]
+            devnull = open('/dev/null', 'w')
+            if settings['call'][0] == True:
+                proc=subprocess.Popen("curl -X POST 'https://api.twilio.com/2010-04-01/Accounts/" + AC + "/Calls.json'"
+                    " --data-urlencode 'To=" + settings['callTo'][0] + "'  --data-urlencode 'From=+12345644693'"
+                    " -d 'Url=https://log.bio/logCall.xml'  -d 'Method=GET'  -d 'FallbackMethod=GET'"
+                    " -d 'StatusCallbackMethod=GET' -d 'StatusCallback=https://log.bio/failBack.xml'"
+                    " -d 'Record=false' -u " + settings['twilio'][0] , stdout=subprocess.PIPE, stderr=devnull,  shell=True )
+                result = json.loads(proc.communicate()[0])
+                if result['status'] != 'queued':
+                    print 'ERROR: Could not initiate call via Twilio. Twilio replied with:'
+                    for x,y in result.items(): print x + ':  ' + y
+            if settings['text'][0] == True:
+                proc=subprocess.Popen(
+                    "curl -X POST 'https://api.twilio.com/2010-04-01/Accounts/" + AC + "/Messages.json'"
+                    " --data-urlencode 'To=" + settings['textTo'][0] + "'  --data-urlencode 'From=+12345644693'"
+                    " --data-urlencode 'Body=Command '"+ ID +"has finished running. -log'"
+                    " -u " + settings['twilio'][0],  stdout=devnull, stderr=devnull, shell=True)
+                result = json.loads(proc.communicate()[0])
+                if result['status'] != 'queued':
+                    print 'ERROR: Could not send text message via Twilio. Twilio replied with:'
+                    for x,y in result.items(): print x + ':  ' + y
+        else:
+            ## Need to improve checking of Twilio API keys.
+            print 'ERROR: The twilio API key provided does not start with "AC", suggesting you have pasted the wrong thing :('
+            print 'It should look something like: '
+
+
+if len(command) == 1:
+    interactive = False
+    if (command[0][0] == "'" and command[0][-1] == "'") or (command[0][0] == '"' and command[0][-1] == '"'): command[0] = command[0][1:-1]
+    command = command[0]
+    log(command)
+elif len(command) > 1:
+    interactive = False
+    command = ' '.join(command)
+    log(command)
+else:
+    interactive = True
+    printStatus()
+    command = ''
+    while command.strip() not in ['exit', 'quit']:
+        command = raw_input('log + ') if settings['log'][0] else raw_input('log - ')
+        if command.strip() == 'log':
+            settings['log'][0] = not settings['log'][0]
+        elif command.strip() == 'sync':
+            syncBackups()
+            userConfPath,offlineConfig,online = syncConfig(userConfPath,offlineConfig)
+            dataSynced = syncData(online)
+            printStatus()
+        elif command.strip() == 'cd':
+            while True:
+                try:
+                    os.chdir(raw_input('Change log directory to: '))
+                    break
+                except Exception as e: print e
+        elif command.strip() in ['','exit','quit']:
+            pass
+        else: log(command)
+
+'''
+########################
+### DEVELOPER TO DOs ###
+##########################################################################################################
+ 1) The big one:
+        The current process of parsing the command to guess which files will be used has some fundamental flaws, particularly that
+        its difficult to know if the command really used/modified a resource, or another process did. The only way I know to be certain what
+        resources the logged event really used/created/modified/deleted is to dynamically inject a shared C library (.so created using gnu's ld --wrap and 
+        using LD_PRELOAD or DYLD_INSERT_LIBRARIES), to overwrite the open(2) function with a function that looksup/hashes the file before passing 
+        a file descriptor back to the main process using dlopen(), and dlsym() from libdl to call the real function. Doing this would require a much more 
+        skilled programmer than I (and obviously means the program will only work in *nix environments), but the basic idea is pretty clear.. Intercept any open() 
+        event, if it's a file hash it, if it's a pipe forget it, if it doesnt exist add it to the watchList as before for post-execution hashing. Also catch any 
+        subsequent read() and write() events to know how to label the relationship at the end. If anyone reading this knows how to do any of this, THIS is the most
+        important to-do since other to-dos (such as parrallel hashing of files) become somewhat irrelevent if this gets done. But I have no idea where to start :(
+ 2) Remove requests as a dependancy by doing everything with urllib2. Whilst python programmers will protest, please remember that not everyone knows what pip is, 
+        or how python virtual environments work.
+ 3) Bulk syncing of cached data? Could be good (for speed) could be bad (for limiting how many logs users can submit a day...)
+ 4) syncData should move files whos filename is a valid md5 hash, not just anything thats not a .conf 
+ 5) Add "alias log=/path/to/log" in users ~/.bashrc during user setup. Currently DIY because I dont want to mess with people's system too much, but could be useful 
+        to automatically do it for them.
+ 6) Suprocess hashing to multiple cores, with a settings default of 1 core. If to-do 1 gets done, this could still be useful for pre/post-execution hashing of newly
+        created files.
+ 7) During system setup, we could offer the user the ability to create a directory if it doesnt exist. Just need to add two other results to checkPath(): 
+        [False,doesnt exist (and we cant create it)] and [True,doesnt exist (but we can create it)]
+ 8) Uninstaller - delete the .log.conf, or even the whole offline/backups directories?
+
+    JavaScript Programmers! Can you code for Node.js? If so, check out the server code for this project at ac.gt/log/log-server.html :)
+    Web Developers! Do you know HTML/CSS/JS? If so, check out the webpage code for this project at ac.gt/log/site.html
+
+##########################################################################################################
+'''
