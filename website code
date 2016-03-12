@@ -1,3 +1,0 @@
-To get the latest website code, simply run:
-
-for url in $(curl http://log.bio/all); do curl --create-dirs -o $url http://log.bio/$url; done
