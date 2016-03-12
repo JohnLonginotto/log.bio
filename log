@@ -103,11 +103,11 @@ def communicate(endpoint,data,isJSON=False):
     if isJSON == False: data = json.dumps(data)
     if settings['ssl'][0]:
         verify=True
-        protocol = 'https'
+        protocol = 'https://'
     else:
         verify=False
-        protocol = 'http'
-    return requests.post(protocol + '://' + settings['logServer'][0] + '/' + endpoint, data=data, headers=headers, verify=verify).json()
+        protocol = 'http://'
+    return requests.post(protocol + settings['logServer'][0] + '/' + endpoint, data=data, headers=headers, verify=verify).json()
 
 def complete(text, state):
     ## I REALLY wanted to enhance this with colours/etc to make the interactive console
@@ -449,11 +449,11 @@ def systemSetup():
     os.chmod(os.path.join(logNewPath,'log'), 0705) # set permissions to only read & execute
 
     logConf = json.dumps(settings,sort_keys=True, indent=4)
-    systemData = sqlite3.connect(logConfPath)
+    systemData = sqlite3.connect(logConfPath, timeout=999)
     #systemData.text_factory = str
     cursor = systemData.cursor()
     cursor.execute("CREATE TABLE IF NOT EXISTS 'settings' ('settings' TEXT)") # overkill I know, but at
-    cursor.execute( "INSERT INTO 'settings' VALUES (?)", (logConf,))          # least everything is together.
+    cursor.execute("INSERT INTO 'settings' VALUES (?)", (logConf,))           # least everything is together.
     cursor.execute("CREATE TABLE IF NOT EXISTS 'hashLookup' ('MD5' TEXT,'pHash' TEXT,'size' INT,'mtime' REAL)")
     cursor.execute("CREATE INDEX lookupIndex on hashLookup (size, mtime)")
     systemData.commit()
@@ -487,7 +487,7 @@ def systemSetup():
 def newUserConf(userConfPath,newConf,allTables=False):
     global configSyncd
     configSyncd = True
-    userConf = sqlite3.connect(userConfPath)
+    userConf = sqlite3.connect(userConfPath, timeout=999)
     #userConf.text_factory = str
     cursor = userConf.cursor()
     cursor.execute("DROP TABLE IF EXISTS 'settings'")                            # A table with 1 row is
@@ -537,7 +537,6 @@ def newUserConf(userConfPath,newConf,allTables=False):
             # Because these dummy rows are all Hidden=yes, we never see them.
             cursor.execute("INSERT INTO 'events' DEFAULT VALUES")
         print 'INFO: Successfully created user config at ' + userConfPath
-
     userConf.commit()
     userConf.close()
 
@@ -604,7 +603,7 @@ def userSetup(userConfPath):
 def applyConfigs():
     if os.path.isfile(logConfPath) == False: systemSetup()
 
-    systemData = sqlite3.connect(logConfPath)
+    systemData = sqlite3.connect(logConfPath, timeout=999)
     #systemData.text_factory = str
     syscursor = systemData.cursor()
     syscursor.execute("SELECT * FROM 'settings'")
@@ -631,7 +630,7 @@ def applyConfigs():
         '''
         userSetup(userConfPath)
 
-    userConf = sqlite3.connect(userConfPath)
+    userConf = sqlite3.connect(userConfPath, timeout=999)
     #userConf.text_factory = str
     usrcursor = userConf.cursor()
     usrcursor.execute("SELECT settings FROM settings")
@@ -650,6 +649,7 @@ def applyConfigs():
             else: pass # could alert the user here that their setting was overriden by the system?
         else:
             settings[key] = [value, 'A setting this version of log does not understand', '?']
+    userConf.commit()
     userConf.close()
     return userConfPath,offlineConfig
 
@@ -728,7 +728,7 @@ def syncData(online):
     # DEV NOTE: Really this should try to sync in bulk to '/sync' or something similar,
     # and return the IDs that worked to delete from logs based on ID.
     if online:
-        userConf = sqlite3.connect(userConfPath)
+        userConf = sqlite3.connect(userConfPath, timeout=999)
         #userConf.text_factory = str
         userCursor = userConf.cursor()
         userCursor.execute("CREATE TABLE IF NOT EXISTS 'logs' ('ID' TEXT, 'data' TEXT)")
@@ -769,11 +769,13 @@ def syncData(online):
                         print 'ERROR: The was an error which prevented log from syncing to the logServer. It was:'
                         print e
                         print 'log will continue without syncing now, but if you could send this error to us that would be great :)'
+            userConf.commit()
             userConf.close()
             if syncSuccess == True:      return '\033[92m[synced cache]\033[0m'
             if syncSuccess == False:     return '\033[93m[unable to sync cache]\033[0m'
             if syncSuccess == 'partial': return '\033[94m[unable to sync all cache]\033[0m'
         else:
+            userConf.commit()
             userConf.close()
             return ''
 
@@ -973,7 +975,7 @@ def log(command):
         realDirectoryUsed = set()
         possiblePaths = set()
         executablePaths = os.environ.get('PATH').split(os.pathsep)  # for finding alias (lke 'echo' as '/bin/echo')
-        realDirectoryWatch.add(os.getcwd())                         # current directory in watch list
+        #realDirectoryWatch.add(os.getcwd())                         # current directory in watch list
 
         def isResource(argument):
             argument = argument.strip(' ')
@@ -1073,27 +1075,32 @@ def log(command):
             # simultaneously. In fact we basically get the MD5 for 'free' since disk IO is
             # so much slower than calculation speed. If you can think of another statistic
             # that would be significantly informative, please let us know!!
-            md5 = hashlib.md5()
-            bytesPerBlock = os.path.getsize(path)/50.
-            blocks = []
-            pHash = ''
-            blocksDone = 0
-            with open(path,'rb') as f:
-                for blockNumber in range(1,51):
-                    blocksToDo = int(bytesPerBlock*blockNumber)-blocksDone
-                    blocksDone += blocksToDo
-                    chunk = f.read(blocksToDo)
-                    if chunk == '': blocks.append(0); continue
-                    md5.update(chunk)
-                    #blocks.append(sum(ord(x) for x in f.read(blocksToDo))/blocksToDo)  # OK
-                    #blocks.append(sum(map(ord, f.read(blocksToDo)))/blocksToDo)        # Fast
-                    #blocks.append(sum(bytearray(chunk))/blocksToDo)                    # Faster
-                    blocks.append(sum(array.array('B', chunk))/blocksToDo)              # Fastest
-            md5Hash = md5.hexdigest()
-            for block in blocks: pHash += hex(block)[2:].rjust(2,'0')
-            return (md5Hash,pHash)
+            try:
+                md5 = hashlib.md5()
+                bytesPerBlock = os.path.getsize(path)/50.
+                blocks = []
+                pHash = ''
+                blocksDone = 0
+                with open(path,'rb') as f:
+                    for blockNumber in range(1,51):
+                        blocksToDo = int(bytesPerBlock*blockNumber)-blocksDone
+                        blocksDone += blocksToDo
+                        chunk = f.read(blocksToDo)
+                        if chunk == '': blocks.append(0); continue
+                        md5.update(chunk)
+                        #blocks.append(sum(ord(x) for x in f.read(blocksToDo))/blocksToDo)  # OK
+                        #blocks.append(sum(map(ord, f.read(blocksToDo)))/blocksToDo)        # Fast
+                        #blocks.append(sum(bytearray(chunk))/blocksToDo)                    # Faster
+                        blocks.append(sum(array.array('B', chunk))/blocksToDo)              # Fastest
+                md5Hash = md5.hexdigest()
+                for block in blocks: pHash += hex(block)[2:].rjust(2,'0')
+                return (md5Hash,pHash)
+            except OSError:
+                return None
 
-        def localMD5Check(successfullyHashed,stillToHash,syscursor):
+        def localMD5Check(successfullyHashed,stillToHash):
+            systemData = sqlite3.connect(logConfPath, timeout=999)
+            syscursor = systemData.cursor()
             for filePath,fileData in stillToHash.items():
                 fileSize,mtime,hashes = fileData
                 syscursor.execute("SELECT MD5,pHash from 'hashLookup' WHERE size=? and mtime=?", (fileSize,mtime))
@@ -1102,9 +1109,10 @@ def log(command):
                     fileData = [fileSize,mtime,hashes]
                     successfullyHashed[filePath] = fileData
                     del stillToHash[filePath]
+            systemData.close()
             return [successfullyHashed,stillToHash]
 
-        def remoteMD5Check(successfullyHashed,stillToHash,syscursor):
+        def remoteMD5Check(successfullyHashed,stillToHash):
             ## The idea was thrown around to support external lookup databases, but we'll have to see...
             return [successfullyHashed,stillToHash]
 
@@ -1113,14 +1121,17 @@ def log(command):
             temp = {}
             for path in stillToHash:
                 if os.path.isfile(path):
+                    # We dont ignore dotfiles if they are mentioned explicitly
                     temp[path] = [os.path.getsize(path),os.path.getmtime(path),None]
                 elif os.path.isdir(path):
                     # DEV NOTE: Need to put in a recursion step, like settings['maxFileRecursion'][0] = 5, to go up to 5 subfolders.
-                    for fileOrFolder in os.listdir(path):
-                        if fileOrFolder[0] == '.': continue # ignore dotfiles. Prevents flooding the database with .DS_Store modifications.
-                        fileOrFolder = os.path.join(path,fileOrFolder)
-                        if os.path.isfile(fileOrFolder):
-                            temp[fileOrFolder] = [os.path.getsize(fileOrFolder),os.path.getmtime(fileOrFolder),None]
+                    for directory, _ , files in os.walk(path):
+                        if '/.' in directory: continue
+                        for fileName in files:
+                            if fileName[0] == '.': continue
+                            fullFileName = os.path.join(directory,fileName)
+                            if os.path.isfile(fullFileName):
+                                temp[fullFileName] = [os.path.getsize(fullFileName),os.path.getmtime(fullFileName),None]
                 else:
                     # possiblePaths or deleted paths are just quietly dropped at this point.
                     pass
@@ -1131,35 +1142,39 @@ def log(command):
             if settings['md5'][0]: # always re-calculate hash
                 for path,data in stillToHash.items():
                     size,mtime,hashes = data
-                    successfullyHashed[path] = [size,mtime,getHashes(path)]
+                    hashes = getHashes(path)
+                    if hashes == None: continue                                    # File was deleted between seeing it and hashing it.
+                    successfullyHashed[path] = [size,mtime,hashes]
                     if settings['debug'][0]: print 'Hashed file: ' + path
                 return successfullyHashed
             else:
-                systemData = sqlite3.connect(logConfPath)
-                #systemData.text_factory = str
-                syscursor = systemData.cursor()
                 for path,data in stillToHash.items():
                     size,mtime,hashes = data
                     if int(size) < settings['shortcutAt'][0]:                      # Quicker to hash
-                        successfullyHashed[path] = [size,mtime,getHashes(path)]
+                        hashes = getHashes(path)
+                        if hashes == None: continue                                # File was deleted
+                        successfullyHashed[path] = [size,mtime,hashes]
                         if settings['debug'][0]: print 'Quickly hashed file: ' + path
                     else:
                         temp[path] = data
-                stillToHash = temp; temp = {}
-                if len(stillToHash) > 0: 
-                    successfullyHashed,stillToHash = localMD5Check(successfullyHashed,stillToHash,syscursor)
+                stillToHash = temp
+                if len(stillToHash) > 0: successfullyHashed,stillToHash = localMD5Check(successfullyHashed,stillToHash)
+                if len(stillToHash) > 0: successfullyHashed,stillToHash = remoteMD5Check(successfullyHashed,stillToHash)
                 if len(stillToHash) > 0:
-                    successfullyHashed,stillToHash = remoteMD5Check(successfullyHashed,stillToHash,syscursor)
-                if len(stillToHash) > 0:
+                    newHashes = []
                     for path,data in stillToHash.items():
                         size,mtime,hashes = data
                         hashes = getHashes(path)
+                        if hashes == None: continue                                # File was deleted
                         successfullyHashed[path] = [size,mtime,hashes]
-                        syscursor.execute("INSERT INTO 'hashLookup' VALUES (?,?,?,?)", (hashes[0],hashes[1],size,mtime))
+                        newHashes.append( (hashes[0],hashes[1],size,mtime) )
                         if settings['debug'][0]: print 'Finally hashed file: ' + path
-
-                systemData.commit()
-                systemData.close()
+                    systemData = sqlite3.connect(logConfPath, timeout=999)
+                    syscursor = systemData.cursor()
+                    for newHash in newHashes:
+                        syscursor.execute("INSERT INTO 'hashLookup' VALUES (?,?,?,?)", newHash)
+                    systemData.commit()
+                    systemData.close()
                 return successfullyHashed
 
         realFilesUsedHash = hashEverything(realFilesUsed)
@@ -1260,9 +1275,14 @@ def log(command):
     stderr = ''
     originalCommand = command
     ttyBefore = termios.tcgetattr(sys.stdin)  # We grab the state of the user's terminal, then pop it into raw mode
-    tty.setraw(sys.stdin)                     # else we're going to have a bad time (this took FOREVER to figure out)
 
-    parent, child = zip(pty.openpty(), pty.openpty()) # open up a fresh pair of pseudoterminals for both stdout and stderr.
+    #tty.setraw(sys.stdin)                     # else we're going to have a bad time (this took FOREVER to figure out)
+    parent, child = zip(os.openpty(), os.openpty()) # open up a fresh pair of pseudoterminals for both stdout and stderr.
+    readable = { parent[0]: sys.stdout, parent[1]: sys.stderr }
+
+    buf = array.array('h', [0, 0, 0, 0])                            # Set windows size of
+    fcntl.ioctl(pty.STDOUT_FILENO, termios.TIOCGWINSZ, buf, True)   # pty to that of the
+    fcntl.ioctl(parent[0], termios.TIOCSWINSZ, buf)                 # parent window
 
     # DEV NOTE: Could add "export IGNOREEOF=1" to the screen commands to prevent Ctrl+D from closing the terminal..?
     if settings['screen'][0]:   command = 'screen -h 10000 -S ' + ID + ' -d -m sh -c \'' + command + ' ; /bin/bash \'' 
@@ -1270,18 +1290,15 @@ def log(command):
     if settings['verbose'][0] == True and settings['silent'][0] == False and settings['log'] == True:
         print '\nStarted at:' , startTimeString
         print 'Running: ' + ID + ' - ' + originalCommand
-
     if settings['debug'][0]: print '\n#################### ACTUAL ######## OUTPUT ####################'
 
+    p = subprocess.Popen(command, stdout=child[0], stderr=child[1], shell=True, executable='/bin/bash')
+    time.sleep(1)
 
-    p = subprocess.Popen(command,  stdout=child[0], stderr=child[1], shell=True, executable='/bin/bash')
+    termios.tcsetattr(sys.stdout, termios.TCSADRAIN, termios.tcgetattr(child[0]) )
+    termios.tcsetattr(sys.stderr, termios.TCSADRAIN, termios.tcgetattr(child[0]) )
     for fd in child: os.close(fd)
 
-    buf = array.array('h', [0, 0, 0, 0])                            # Set windows size of
-    fcntl.ioctl(pty.STDOUT_FILENO, termios.TIOCGWINSZ, buf, True)   # pty to that of the
-    fcntl.ioctl(parent[0], termios.TIOCSWINSZ, buf)                 # parent window
-
-    readable = { parent[0]: sys.stdout, parent[1]: sys.stderr }
     try:
         while readable:
             for fd in select.select(readable, [], [])[0]:
@@ -1290,7 +1307,7 @@ def log(command):
                     if e.errno != errno.EIO: raise
                     del readable[fd]
                 finally:
-                    if fd in readable: ## Removed from OSX version. Maybe on purpose?
+                    if fd in readable:
                         if not data: del readable[fd]
                         else:
                             if fd == parent[0]: stdout += data.decode('utf-8') # DEV NOTE: You might have to
@@ -1661,13 +1678,12 @@ def log(command):
                     unableToSync = True
             except Exception as e:
                 if settings['debug'][0]:
-                    print 'ERROR: The was an error which prevented log from syncing to the logServer. It was:'
+                    print 'ERROR: There was an error which prevented log from syncing to the logServer. It was:'
                     print e
                     print 'log will continue without syncing now, but if you could send this error to us that would be great :)'
                 else:
                     print '\033[93m[cached]\033[0m'
                 unableToSync = True
-
             if unableToSync == False: print '\033[92m[logged]\033[0m', syncData(online) 
 
             ## Write the execution event to the oldest row in the ./offline database.
@@ -1728,10 +1744,10 @@ def log(command):
                     "updatedOn=current_timestamp "
                     " WHERE row = (SELECT row FROM events ORDER BY updatedOn ASC LIMIT 1)" # Updates the oldest entry.
                 ,commandRow.values())
-                con.commit()
                 if unableToSync:
                     cur.execute("INSERT INTO 'logs' VALUES (?,?)", (commandRow['ID'],data) )
-                    con.commit()
+                con.commit()
+                con.close()
             except sqlite3.Error, e:
                 print 'ERROR: Something went wrong saving your logs to the ./offline directory on your system.'
                 print 'The exact error was:'
